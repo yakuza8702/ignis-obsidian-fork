@@ -5,6 +5,7 @@ import { installEmulateMobile } from "./emulate-mobile.js";
 import { installMobileVaultSwitcher } from "./mobile-vault-switcher.js";
 import { installOpenFileParam } from "./open-file-param.js";
 import { initialize, getBootstrapVirtualPlugins } from "./init.js";
+import { installClientStateMirror } from "./client-state.js";
 import { fsShim } from "./fs/index.js";
 import { registerUI } from "./ui-registry.js";
 import {
@@ -62,6 +63,10 @@ installEmulateMobile();
 setTimeout(() => {
   window.__ignisBooting = false;
 }, 20000);
+
+// Rehydrate mirrored localStorage keys (plugin trust, last vault) before
+// initialize() resolves the vault and before Obsidian's trust check runs.
+installClientStateMirror();
 
 initialize(); // vault config, metadata cache, plugin prompt
 

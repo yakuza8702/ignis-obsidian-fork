@@ -148,6 +148,7 @@ An Express server that handles filesystem operations, vault management, static f
 - `/api/proxy` - cross-origin HTTP proxy used by the fetch and requestUrl shims.
 - `/api/version` - Ignis version (SemVer), per-build identifier, and pinned Obsidian version.
 - `/api/settings/*` - read and update runtime server settings (cache sizes, request body limit, write-coalesce window, proxy mode and allowlist, direct-fetch host allowlist).
+- `/api/client-state/*` - server mirror of the small set of browser localStorage keys that matter across browser-data clears (community-plugin trust, last vault); the shim rehydrates them at boot and mirrors qualifying writes back. Disabled in demo mode.
 - `/api/plugins/*` - Ignis plugin management (list, enable, disable). __WIP__
 - `/api/ext/:pluginId/*` - routes registered by individual Ignis plugins.
 - `/vault-files/<vaultId>/<path>` - static file serving rooted at a vault, used by Obsidian for image/attachment resource URLs.

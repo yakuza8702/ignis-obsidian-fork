@@ -81,6 +81,7 @@ const vaultRoutes = require("./routes/vault");
 const proxyRoutes = require("./routes/proxy");
 const versionRoutes = require("./routes/version");
 const settingsRoutes = require("./routes/settings");
+const clientStateRoutes = require("./routes/client-state");
 const bootstrapRoutes = require("./routes/bootstrap");
 const vaultLifecycle = require("./vault-lifecycle");
 
@@ -95,6 +96,7 @@ app.use("/api/vault", vaultRoutes);
 app.use("/api/proxy", proxyRoutes);
 app.use("/api/version", versionRoutes);
 app.use("/api/settings", settingsRoutes);
+app.use("/api/client-state", clientStateRoutes);
 app.use("/api/plugins", pluginRoutes);
 app.use("/api/bootstrap", bootstrapRoutes);
 
