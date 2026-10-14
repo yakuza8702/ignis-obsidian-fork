@@ -1,40 +1,85 @@
-import { Setting, Notice, setIcon } from "obsidian";
-import { isDemoMode } from "../demo-guards.js";
-import { stripBuildMetadata, isNewer } from "../util/version.js";
-import { ListEditorModal } from "./list-editor-modal.js";
+import { setIcon } from "obsidian";
+import { checkForUpdate } from "../update-check.js";
+import * as serverSettings from "./server-settings.js";
+import { numberField, listField } from "./server-setting-fields.js";
+import { messageDefinition, blockDefinition } from "./settings-ui.js";
 
 const GITHUB_URL = "https://github.com/Nystik-gh/ignis";
-const GITHUB_API_LATEST =
-  "https://api.github.com/repos/Nystik-gh/ignis/releases/latest";
+
+const TEXT_LINKS = [
+  { text: "Docs", href: "https://ignis.thiefling.com/docs/" },
+];
+
+const ICON_LINKS = [
+  {
+    label: "Discord",
+    href: "https://discord.gg/8pqQQj4my",
+    icon: "/assets/discord.svg",
+  },
+  {
+    label: "Ko-fi",
+    href: "https://ko-fi.com/nystik",
+    icon: "/assets/kofi.svg",
+  },
+  {
+    label: "GitHub Sponsors",
+    href: "https://github.com/sponsors/Nystik-gh",
+    icon: "/assets/githubsponsors.svg",
+  },
+];
 
 function getVersion() {
   return window.__ignis?.version || "unknown";
 }
 
-async function checkForUpdate(currentVersion) {
-  try {
-    const res = await fetch(GITHUB_API_LATEST);
+function settingDefinitions(tab) {
+  return [
+    { type: "group", cls: "ignis-plain", items: [blockDefinition(addHeader)] },
+    {
+      type: "group",
+      cls: "ignis-plain",
+      visible: () => !window.isSecureContext,
+      items: [blockDefinition(addInsecureContextCallout)],
+    },
+    { type: "group", items: [serverStatusDefinition()] },
+    ...serverSettingsGroups(tab),
+  ];
+}
 
-    if (!res.ok) {
-      return null;
-    }
+function addHeaderLinks(containerEl) {
+  const row = containerEl.createDiv("ignis-header-links");
+  const linkAttrs = { target: "_blank", rel: "noopener noreferrer" };
 
-    const data = await res.json();
-    const latest = stripBuildMetadata(data.tag_name?.replace(/^v/, ""));
-    const current = stripBuildMetadata(currentVersion);
+  for (const link of TEXT_LINKS) {
+    row.createEl("a", {
+      cls: "ignis-header-text-link",
+      text: link.text,
+      href: link.href,
+      attr: linkAttrs,
+    });
+  }
 
-    if (isNewer(latest, current)) {
-      return { version: latest, url: data.html_url };
-    }
+  row.createSpan("ignis-header-links-separator");
 
-    return null;
-  } catch {
-    return null;
+  for (const link of ICON_LINKS) {
+    const anchor = row.createEl("a", {
+      cls: "ignis-header-link",
+      href: link.href,
+      attr: { ...linkAttrs, "aria-label": link.label },
+    });
+
+    anchor.createEl("img", {
+      cls: "ignis-header-link-icon",
+      attr: { src: link.icon, alt: link.label },
+    });
   }
 }
 
-function display(containerEl, app) {
+function addHeader(containerEl) {
   const version = getVersion();
+
+  containerEl.addClass("ignis-header-block");
+  addHeaderLinks(containerEl);
 
   const header = containerEl.createDiv("ignis-header");
 
@@ -84,20 +129,12 @@ function display(containerEl, app) {
       updateIndicator.textContent = "Up to date";
     }
   });
-
-  addInsecureContextCallout(containerEl);
-  addServerStatus(containerEl);
-  addServerSettings(containerEl, app);
 }
 
 const REMOTE_ACCESS_DOCS_URL =
   "https://ignis.thiefling.com/docs/security/remote-access/#running-without-tls";
 
 function addInsecureContextCallout(containerEl) {
-  if (window.isSecureContext) {
-    return;
-  }
-
   const callout = containerEl.createDiv("ignis-insecure-callout");
 
   const icon = callout.createDiv("ignis-insecure-callout-icon");
@@ -133,209 +170,149 @@ const STATUS_DOT_CLASSES = {
   closed: "ignis-status-disconnected",
 };
 
-function createSettingGroup(containerEl, heading) {
-  const group = containerEl.createDiv("setting-group");
+function serverStatusDefinition() {
+  return {
+    name: "Server status",
+    render: (setting) => {
+      const ws = window.__ignis.ws;
 
-  if (heading) {
-    new Setting(group).setName(heading).setHeading();
-  }
+      setting.settingEl.addClass("ignis-status-setting");
 
-  return group.createDiv("setting-items");
-}
+      const dotEl = setting.controlEl.createEl("span", {
+        cls: "ignis-status-dot",
+      });
 
-function addServerStatus(containerEl) {
-  const ws = window.__ignis.ws;
+      const labelEl = setting.controlEl.createEl("span", {
+        cls: "ignis-status-label",
+      });
 
-  const items = createSettingGroup(containerEl);
+      function renderState(state) {
+        dotEl.className = `ignis-status-dot ${STATUS_DOT_CLASSES[state] || STATUS_DOT_CLASSES.closed}`;
+        labelEl.textContent = STATUS_LABELS[state] || STATUS_LABELS.closed;
+      }
 
-  const setting = new Setting(items).setName("Server status");
+      renderState(ws.isOpen() ? "open" : "closed");
 
-  const dotEl = setting.controlEl.createEl("span", {
-    cls: "ignis-status-dot",
-  });
-
-  const labelEl = setting.controlEl.createEl("span", {
-    cls: "ignis-status-label",
-  });
-
-  function render(state) {
-    dotEl.className = `ignis-status-dot ${STATUS_DOT_CLASSES[state] || STATUS_DOT_CLASSES.closed}`;
-    labelEl.textContent = STATUS_LABELS[state] || STATUS_LABELS.closed;
-  }
-
-  render(ws.isOpen() ? "open" : "closed");
-
-  const unsub = ws.onStateChange(render);
-
-  // Detach when the settings tab DOM goes away.
-  const observer = new MutationObserver(() => {
-    if (!containerEl.isConnected) {
-      unsub();
-      observer.disconnect();
-    }
-  });
-
-  observer.observe(containerEl.parentElement || document.body, {
-    childList: true,
-    subtree: true,
-  });
+      return ws.onStateChange(renderState);
+    },
+  };
 }
 
 const MB = 1024 * 1024;
 const MINUTE = 60 * 1000;
 
-function addServerSettings(containerEl, app) {
-  if (isDemoMode()) {
-    const items = createSettingGroup(containerEl);
-
-    new Setting(items)
-      .setName("Server settings")
-      .setDesc("Server settings are disabled in demo mode.");
-    return;
+function serverSettingsGroups(tab) {
+  if (!serverSettings.get()) {
+    return [
+      {
+        type: "group",
+        items: [
+          messageDefinition(
+            serverSettings.loadFailed()
+              ? "Failed to load server settings."
+              : "Loading server settings...",
+          ),
+        ],
+      },
+    ];
   }
 
-  const loading = containerEl.createEl("p", {
-    text: "Loading server settings...",
-    cls: "setting-item-description",
-  });
-
-  fetch("/api/settings")
-    .then((res) => (res.ok ? res.json() : Promise.reject(res)))
-    .then((current) => {
-      loading.remove();
-      renderServerSettings(containerEl, current, app);
-    })
-    .catch(() => {
-      loading.setText("Failed to load server settings.");
-    });
-}
-
-function renderServerSettings(containerEl, current, app) {
-  const caching = createSettingGroup(containerEl, "Caching");
-
-  numberField(caching, {
-    name: "Content cache (MB)",
-    desc: "Browser cache of file content. Applies after reload.",
-    value: Math.round(current.contentCacheBytes / MB),
-    key: "contentCacheBytes",
-    toStored: (n) => n * MB,
-  });
-
-  numberField(caching, {
-    name: "Input cache (MB)",
-    desc: "Cache for files picked for import. Applies after reload.",
-    value: Math.round(current.inputCacheBytes / MB),
-    key: "inputCacheBytes",
-    toStored: (n) => n * MB,
-  });
-
-  numberField(caching, {
-    name: "Input cache TTL (minutes)",
-    desc: "How long picked files stay cached. Applies after reload.",
-    value: Math.round(current.inputCacheTtlMs / MINUTE),
-    key: "inputCacheTtlMs",
-    toStored: (n) => n * MINUTE,
-  });
-
-  const security = createSettingGroup(containerEl, "Security");
-
-  numberField(security, {
-    name: "Max request body (MB)",
-    desc: "Largest request the server accepts.",
-    value: Math.round(current.maxBodyBytes / MB),
-    key: "maxBodyBytes",
-    toStored: (n) => n * MB,
-  });
-
-  proxyAccessField(security, current, app);
-
-  listField(security, {
-    name: "Direct-fetch hosts",
-    desc: "Hosts the browser fetches directly, bypassing the proxy. Only for hosts that allow cross-origin browser requests (CORS);  everything else goes through the proxy. Applies after reload.",
-    value: current.directFetchHosts,
-    key: "directFetchHosts",
-    app,
-    modal: {
-      placeholder: "api.example.com",
-      emptyNote: "No hosts yet.",
+  return [
+    {
+      type: "group",
+      heading: "Caching",
+      items: [
+        numberField({
+          name: "Content cache (MB)",
+          desc: "Browser cache of file content. Applies after reload.",
+          key: "contentCacheBytes",
+          fromStored: (bytes) => Math.round(bytes / MB),
+          toStored: (n) => n * MB,
+        }),
+        numberField({
+          name: "Input cache (MB)",
+          desc: "Cache for files picked for import. Applies after reload.",
+          key: "inputCacheBytes",
+          fromStored: (bytes) => Math.round(bytes / MB),
+          toStored: (n) => n * MB,
+        }),
+        numberField({
+          name: "Input cache TTL (minutes)",
+          desc: "How long picked files stay cached. Applies after reload.",
+          key: "inputCacheTtlMs",
+          fromStored: (ms) => Math.round(ms / MINUTE),
+          toStored: (n) => n * MINUTE,
+        }),
+      ],
     },
-  });
-
-  const advanced = createSettingGroup(containerEl, "Advanced");
-
-  numberField(advanced, {
-    name: "Write coalesce window (ms)",
-    desc: "Debounce window for rapid writes on slow filesystems. 0 disables. Maximum 60000.",
-    value: current.writeCoalesceMs,
-    key: "writeCoalesceMs",
-    toStored: (n) => n,
-  });
+    {
+      type: "group",
+      heading: "Security",
+      items: [
+        numberField({
+          name: "Max request body (MB)",
+          desc: "Largest request the server accepts.",
+          key: "maxBodyBytes",
+          fromStored: (bytes) => Math.round(bytes / MB),
+          toStored: (n) => n * MB,
+        }),
+        ...proxyAccessFields(tab),
+        listField(tab, {
+          name: "Direct-fetch hosts",
+          desc: "Hosts the browser fetches directly, bypassing the proxy. Only for hosts that allow cross-origin browser requests (CORS);  everything else goes through the proxy. Applies after reload.",
+          key: "directFetchHosts",
+          modal: {
+            placeholder: "api.example.com",
+            emptyNote: "No hosts yet.",
+          },
+        }),
+      ],
+    },
+    {
+      type: "group",
+      heading: "Advanced",
+      items: [
+        numberField({
+          name: "Write coalesce window (ms)",
+          desc: "Debounce window for rapid writes on slow filesystems. 0 disables. Maximum 60000.",
+          key: "writeCoalesceMs",
+          fromStored: (n) => n,
+          toStored: (n) => n,
+        }),
+        ignoreRulesField(),
+      ],
+    },
+  ];
 }
 
-// Persist a single setting. The server validates, applies the live ones, and saves.
-async function saveSetting(partial) {
-  try {
-    const res = await fetch("/api/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(partial),
-    });
-
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || "Save failed");
-    }
-  } catch (e) {
-    new Notice(`Failed to save setting: ${e.message}`);
-  }
-}
-
-function numberField(containerEl, { name, desc, value, key, toStored }) {
-  let committed = value;
-
-  new Setting(containerEl)
-    .setName(name)
-    .setDesc(desc)
-    .addText((text) => {
-      text.setValue(String(value));
-
-      // Commit only on change.
-      const commit = () => {
-        const n = parseInt(text.getValue(), 10);
-
-        if (!Number.isInteger(n) || n < 0 || n === committed) {
-          return;
-        }
-
-        committed = n;
-        saveSetting({ [key]: toStored(n) });
-      };
-
-      text.inputEl.addEventListener("blur", commit);
-      text.inputEl.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          commit();
-        }
-      });
-    });
+function getProxyMode() {
+  return serverSettings.get().proxyMode || "any";
 }
 
 // Proxy access mode plus the allowlist row, which only shows in "allowlist" mode.
-function proxyAccessField(parent, current, app) {
-  let mode = current.proxyMode || "any";
+function proxyAccessFields(tab) {
+  const accessField = {
+    name: "Proxy access",
+    desc: "Which external hosts Obsidian may reach through the server's CORS proxy.",
+    render: (setting) => {
+      setting.addDropdown((dd) => {
+        dd.addOption("any", "Any public host");
+        dd.addOption("allowlist", "Allowlist only");
+        dd.addOption("disabled", "Disabled");
+        dd.setValue(getProxyMode());
 
-  const setting = new Setting(parent)
-    .setName("Proxy access")
-    .setDesc(
-      "Which external hosts Obsidian may reach through the server's CORS proxy.",
-    );
+        dd.onChange(async (value) => {
+          await serverSettings.save({ proxyMode: value });
+          tab.refreshDomState();
+        });
+      });
+    },
+  };
 
-  const allowlistSetting = listField(parent, {
+  const allowlistField = listField(tab, {
     name: "Proxy host allowlist",
     desc: "Hostnames the proxy may reach, matched exactly.",
-    value: current.proxyAllowlist,
     key: "proxyAllowlist",
-    app,
     modal: {
       placeholder: "api.example.com",
       emptyNote: "No hosts yet.",
@@ -352,55 +329,68 @@ function proxyAccessField(parent, current, app) {
     },
   });
 
-  const applyVisibility = () => {
-    allowlistSetting.settingEl.style.display =
-      mode === "allowlist" ? "" : "none";
+  return [
+    accessField,
+    { ...allowlistField, visible: () => getProxyMode() === "allowlist" },
+  ];
+}
+
+function ignoreRulesField() {
+  return {
+    name: "Ignored paths",
+    desc: createFragment((frag) => {
+      frag.appendText(
+        "Rules for paths to ignore when watching for file changes. Ignored paths still appear in the vault and can be manually refreshed. Uses gitignore patterns ",
+      );
+      frag.createEl("a", {
+        text: "Learn more",
+        href: "https://ignis.thiefling.com/docs/performance/#ignored-paths",
+        attr: { target: "_blank", rel: "noopener noreferrer" },
+      });
+    }),
+    render: (setting) => {
+      const current = serverSettings.get();
+      let rules = current.ignoreRules;
+
+      const setLabel = (btn) =>
+        btn.setButtonText(rules.length ? `Edit (${rules.length})` : "Edit");
+
+      setting.addButton((btn) => {
+        setLabel(btn);
+
+        btn.onClick(() => {
+          openIgnoreRulesEditor({
+            rules,
+            suggestions: current.ignoreSuggestions,
+            onChange: async (edited) => {
+              rules = edited;
+              setLabel(btn);
+              await serverSettings.save({ ignoreRules: edited });
+            },
+          });
+        });
+      });
+    },
   };
-
-  setting.addDropdown((dd) => {
-    dd.addOption("any", "Any public host");
-    dd.addOption("allowlist", "Allowlist only");
-    dd.addOption("disabled", "Disabled");
-    dd.setValue(mode);
-
-    dd.onChange((value) => {
-      mode = value;
-      saveSetting({ proxyMode: value });
-      applyVisibility();
-    });
-  });
-
-  applyVisibility();
 }
 
-function listField(containerEl, { name, desc, value, key, app, modal }) {
-  let current = [...(value || [])];
-
-  const setting = new Setting(containerEl).setName(name).setDesc(desc);
-
-  const setLabel = (btn) =>
-    btn.setButtonText(current.length ? `Edit (${current.length})` : "Edit");
-
-  setting.addButton((btn) => {
-    setLabel(btn);
-
-    btn.onClick(() => {
-      new ListEditorModal(app, {
-        title: name,
-        placeholder: modal.placeholder,
-        emptyNote: modal.emptyNote,
-        recommended: modal.recommended,
-        values: current,
-        onChange: (next) => {
-          current = next;
-          saveSetting({ [key]: current });
-          setLabel(btn);
-        },
-      }).open();
-    });
+function openIgnoreRulesEditor(opts) {
+  const component = new window.IgnisUI.IgnoreRulesEditor({
+    // mount to settings modal to avoid focus issues
+    target: document.querySelector(".modal-container") || document.body,
+    props: {
+      rules: opts.rules,
+      suggestions: opts.suggestions,
+    },
   });
 
-  return setting;
+  component.$on("change", (event) => {
+    opts.onChange(event.detail);
+  });
+
+  component.$on("close", () => {
+    component.$destroy();
+  });
 }
 
-export { display };
+export { settingDefinitions };

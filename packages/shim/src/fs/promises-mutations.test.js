@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { createFsPromises } from "./promises.js";
-import { registerPathResolver, _reset } from "./transforms.js";
-import { isRecentLocalOp } from "./echo-guard.js";
+import { registerPathResolver, resolvePath, _reset } from "./transforms.js";
+import { isRecentSentOp } from "./echo-guard.js";
+import { MetadataCache } from "./metadata-cache.js";
+import { ContentCache } from "./content-cache.js";
 
 function makeDeps() {
   const store = new Map();
@@ -24,7 +26,9 @@ function makeDeps() {
 
   const contentCache = {
     get: () => null,
+    pathUpdates: () => 0,
     set: vi.fn(),
+    setFromServer: vi.fn(),
     delete: vi.fn(),
     invalidate: vi.fn(),
   };
@@ -62,8 +66,8 @@ describe("promises directory mutations honor path resolvers", () => {
     expect(deps.store.get("physical/dir")).toEqual({ type: "directory" });
     expect(deps.store.has("logical/dir")).toBe(false);
     expect(deps.transport.mkdir).toHaveBeenCalledWith("physical/dir", true);
-    expect(isRecentLocalOp("physical/dir")).toBe(true);
-    expect(isRecentLocalOp("logical/dir")).toBe(false);
+    expect(isRecentSentOp("physical/dir")).toBe(true);
+    expect(isRecentSentOp("logical/dir")).toBe(false);
   });
 
   it("rmdir uses the resolved path for cache, echo-guard, and transport", async () => {
@@ -84,7 +88,46 @@ describe("promises directory mutations honor path resolvers", () => {
 
     expect(deps.store.has("physical/dir")).toBe(false);
     expect(deps.transport.rmdir).toHaveBeenCalledWith("physical/dir");
-    expect(isRecentLocalOp("physical/dir")).toBe(true);
+    expect(isRecentSentOp("physical/dir")).toBe(true);
+  });
+});
+
+describe("promises rename", () => {
+  it("drops the content the destination held", async () => {
+    const metadataCache = new MetadataCache();
+    const contentCache = new ContentCache();
+    const transport = { rename: vi.fn(async () => {}) };
+    const fs = createFsPromises(metadataCache, contentCache, transport);
+    const from = resolvePath("src.md");
+    const to = resolvePath("dst.md");
+
+    metadataCache.set(from, { type: "file", size: 3 });
+    metadataCache.set(to, { type: "file", size: 5 });
+    contentCache.set(to, "stale");
+
+    await fs.rename("src.md", "dst.md");
+
+    expect(contentCache.get(to)).toBeNull();
+    expect(metadataCache.get(to)).toEqual({ type: "file", size: 3 });
+  });
+
+  it("carries the source's own content to the destination", async () => {
+    const metadataCache = new MetadataCache();
+    const contentCache = new ContentCache();
+    const transport = { rename: vi.fn(async () => {}) };
+    const fs = createFsPromises(metadataCache, contentCache, transport);
+    const from = resolvePath("src.md");
+    const to = resolvePath("dst.md");
+
+    metadataCache.set(from, { type: "file", size: 5 });
+    metadataCache.set(to, { type: "file", size: 5 });
+    contentCache.set(from, "fresh");
+    contentCache.set(to, "stale");
+
+    await fs.rename("src.md", "dst.md");
+
+    expect(contentCache.get(to)).toBe("fresh");
+    expect(contentCache.get(from)).toBeNull();
   });
 });
 
@@ -129,12 +172,42 @@ describe("promises readFile existence", () => {
     );
 
     // Returns the base content after the redirect target 404s: the fallback fired.
-    await expect(fs.readFile("/.obsidian/workspace.json", "utf8")).resolves.toBe(
-      "BASE",
-    );
+    await expect(
+      fs.readFile("/.obsidian/workspace.json", "utf8"),
+    ).resolves.toBe("BASE");
     expect(deps.transport.readFile).toHaveBeenCalledWith(
       ".obsidian/workspace.Work.json",
       "utf8",
     );
+  });
+});
+
+describe("promises readFile racing a write", () => {
+  it("keeps content written while the read was in flight", async () => {
+    const metadataCache = new MetadataCache();
+    const contentCache = new ContentCache();
+    let release;
+
+    metadataCache.set("note.md", { type: "file", size: 6, mtime: 1 });
+
+    const transport = {
+      readFile: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve("server");
+          }),
+      ),
+      writeFile: vi.fn(async () => ({ mtime: 2, size: 5 })),
+    };
+
+    const fs = createFsPromises(metadataCache, contentCache, transport);
+    const read = fs.readFile("note.md", "utf8");
+
+    await fs.writeFile("note.md", "local", "utf8");
+    release();
+    await read;
+
+    expect(await fs.readFile("note.md", "utf8")).toBe("local");
+    expect(transport.readFile).toHaveBeenCalledTimes(1);
   });
 });

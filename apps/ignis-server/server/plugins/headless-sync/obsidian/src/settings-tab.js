@@ -1,195 +1,273 @@
-const { PluginSettingTab, Setting, Notice } = require("obsidian");
+const { PluginSettingTab, Notice } = require("obsidian");
 const api = require("./api");
-const auth = require("./auth");
 const { isCoreSyncEnabled } = require("./core-sync-guard");
-const { renderLogViewer } = require("./log-viewer");
+const { SyncLogModal } = require("./sync-log-modal");
+const { accountSettingDefinition } = require("./auth-section");
+const {
+  SYNC_MODES,
+  FILE_TYPES,
+  CONFIG_CATEGORIES,
+  keysOf,
+} = require("../../sync-options");
+
+function toggleKey(options, selected, key, enabled) {
+  const keys = new Set(selected);
+
+  if (enabled) {
+    keys.add(key);
+  } else {
+    keys.delete(key);
+  }
+
+  return options
+    .filter((option) => keys.has(option.key))
+    .map((option) => option.key);
+}
+
+function isCoreSyncDisabled() {
+  return !isCoreSyncEnabled();
+}
+
+function syncGroup(heading, items) {
+  return { type: "group", heading, visible: isCoreSyncDisabled, items };
+}
+
+function warningDefinition(text) {
+  return {
+    searchable: false,
+    render: (setting) => {
+      setting.descEl.createEl("span", { text, cls: "mod-warning" });
+    },
+  };
+}
+
+function readSyncConfig(vaultState) {
+  return {
+    mode: vaultState.config?.mode || "bidirectional",
+    fileTypes: vaultState.config?.fileTypes || keysOf(FILE_TYPES),
+    configs: vaultState.config?.configs || keysOf(CONFIG_CATEGORIES),
+    excludedFolders: vaultState.config?.excludedFolders || [],
+  };
+}
+
+function describeExcludedFolders(count) {
+  if (count === 0) {
+    return "No folders excluded";
+  }
+
+  return count === 1 ? "1 folder excluded" : `${count} folders excluded`;
+}
+
+function describeSyncStatus(vaultState) {
+  if (vaultState.status === "running") {
+    return "Sync is running";
+  }
+
+  if (vaultState.status === "error") {
+    return `Error: ${vaultState.error}`;
+  }
+
+  return "Sync is stopped";
+}
 
 class HeadlessSyncSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this._cancelWait = null;
-    this._logCleanup = null;
-
-    // Persistent container refs
-    this._authEl = null;
-    this._syncEl = null;
-    this._logsEl = null;
-    this._logsRendered = false;
+    this._shownState = null;
+    this._refreshedThisOpen = false;
   }
 
-  async display() {
-    // Clean up previous log listener before rebuilding
-    if (this._logCleanup) {
-      this._logCleanup();
-      this._logCleanup = null;
+  getSettingDefinitions() {
+    return [
+      {
+        type: "group",
+        visible: isCoreSyncEnabled,
+        items: [this.coreSyncWarningDefinition()],
+      },
+      this.accountGroup(),
+      ...this.syncGroups(),
+    ];
+  }
+
+  updateIfChanged() {
+    const { serverStatus, serverStatusFailed, vaults, vaultsError } =
+      this.plugin;
+    const shownState = JSON.stringify([
+      serverStatus,
+      serverStatusFailed,
+      vaults,
+      vaultsError,
+    ]);
+
+    if (shownState === this._shownState) {
+      return;
     }
 
-    const { containerEl } = this;
-    containerEl.empty();
+    this._shownState = shownState;
+    this.update();
+  }
 
-    this._logsRendered = false;
+  refreshOnOpen() {
+    if (this._refreshedThisOpen) {
+      return;
+    }
 
-    if (isCoreSyncEnabled()) {
-      const syncWarningSetting = new Setting(containerEl)
-        .setName("Obsidian Sync is active");
+    this._refreshedThisOpen = true;
+    this.plugin.loadServerStatus();
+    this.plugin.loadVaults();
+  }
 
-      syncWarningSetting.descEl.createEl("span", {
-        text: "Headless Sync cannot run alongside Obsidian's built-in sync to avoid conflicts. Disable Obsidian Sync in Core Plugins to use Headless Sync instead.",
-        cls: "mod-warning",
-      });
+  coreSyncWarningDefinition() {
+    return {
+      name: "Obsidian Sync is active",
+      render: (setting) => {
+        setting.descEl.createEl("span", {
+          text: "Headless Sync cannot run alongside Obsidian's built-in sync to avoid conflicts. Disable Obsidian Sync in Core Plugins to use Headless Sync instead.",
+          cls: "mod-warning",
+        });
 
-      syncWarningSetting
-        .addButton((btn) => {
+        setting.addButton((btn) => {
           btn.setButtonText("Open Core Plugins").onClick(() => {
             this.app.setting.openTabById("plugins");
           });
-      });
+        });
+      },
+    };
+  }
 
-      return;
+  accountGroup() {
+    const definition = this.serverStatusDefinition();
+    const { render } = definition;
+
+    definition.render = (setting) => {
+      this.refreshOnOpen();
+      render(setting);
+    };
+
+    return syncGroup(undefined, [definition]);
+  }
+
+  serverStatusDefinition() {
+    const { serverStatus, serverStatusFailed } = this.plugin;
+
+    if (serverStatusFailed) {
+      return warningDefinition(
+        "Failed to connect to Headless Sync server plugin.",
+      );
     }
 
-    let serverStatus;
-
-    try {
-      serverStatus = await api.getStatus();
-    } catch {
-      containerEl.createEl("p", {
-        text: "Failed to connect to Headless Sync server plugin.",
-        cls: "mod-warning",
-      });
-      return;
+    if (!serverStatus) {
+      return { name: "Obsidian Sync account", render: () => {} };
     }
 
     if (!serverStatus.installed) {
-      containerEl.createEl("p", {
-        text: "obsidian-headless (ob CLI) is not installed on the server. Install it to enable sync.",
-        cls: "mod-warning",
-      });
-      return;
+      return warningDefinition(
+        "obsidian-headless (ob CLI) is not installed on the server. Install it to enable sync.",
+      );
     }
 
-    this._authEl = containerEl.createDiv();
-    this._syncEl = containerEl.createDiv();
-    this._logsEl = containerEl.createDiv();
-
-    this.renderAuthSection(serverStatus);
-    await this.renderSyncSection(serverStatus.authenticated);
+    return accountSettingDefinition(this, serverStatus);
   }
 
-  renderAuthSection(serverStatus) {
-    this._authEl.empty();
+  syncGroups() {
+    const { serverStatus, serverStatusFailed, vaults, vaultsError } =
+      this.plugin;
 
-    const localToken = auth.getObsidianSyncToken();
-
-    if (serverStatus.authenticated) {
-      new Setting(this._authEl)
-        .setName("Obsidian Sync account")
-        .setDesc(
-          `Signed in as ${serverStatus.name || "unknown"} (${serverStatus.email || "unknown"})`,
-        )
-        .addButton((btn) => {
-          btn.setButtonText("Disconnect");
-          btn.buttonEl.addClass("mod-destructive");
-          btn.onClick(async () => {
-            try {
-              await api.logout();
-              new Notice("Disconnected from Headless Sync");
-              const status = await api.getStatus();
-              this.renderAuthSection(status);
-              await this.renderSyncSection(status.authenticated);
-            } catch (e) {
-              new Notice(`Failed to disconnect: ${e.message}`);
-            }
-          });
-        });
-    } else if (localToken) {
-      new Setting(this._authEl)
-        .setName("Obsidian Sync account detected")
-        .setDesc(`${localToken.name} (${localToken.email})`)
-        .addButton((btn) => {
-          btn
-            .setButtonText("Use this account for Headless Sync")
-            .setCta()
-            .onClick(async () => {
-              try {
-                await auth.sendTokenToServer(localToken);
-                new Notice("Connected to Headless Sync");
-                const status = await api.getStatus();
-                this.renderAuthSection(status);
-                await this.renderSyncSection(status.authenticated);
-              } catch (e) {
-                new Notice(`Failed to connect: ${e.message}`);
-              }
-            });
-        });
-    } else {
-      new Setting(this._authEl)
-        .setName("Obsidian Sync account")
-        .setDesc("Sign in to your Obsidian account to enable sync.")
-        .addButton((btn) => {
-          btn.setButtonText("Log in to Obsidian Sync").onClick(() => {
-            const triggered = auth.triggerLogin(this.app);
-
-            if (!triggered) {
-              new Notice(
-                "Could not open login dialog. Try logging in from Settings > General.",
-              );
-              return;
-            }
-
-            this._cancelWait = auth.waitForLogin(async (token) => {
-              this._cancelWait = null;
-
-              if (token) {
-                new Notice(`Detected login: ${token.name}`);
-                const status = await api.getStatus();
-                this.renderAuthSection(status);
-                await this.renderSyncSection(status.authenticated);
-              }
-            });
-          });
-        });
+    if (!serverStatus) {
+      return serverStatusFailed ? [] : [syncGroup("Vault sync", [])];
     }
-  }
 
-  async renderSyncSection(authenticated) {
-    this._syncEl.empty();
+    if (!serverStatus.installed) {
+      return [];
+    }
 
-    this._syncEl.createEl("h3", { text: "Vault sync" });
+    if (!serverStatus.authenticated) {
+      return [
+        syncGroup("Vault sync", [
+          {
+            name: "Sync not configured",
+            desc: "Sign in to your Obsidian Sync account to set up sync.",
+            render: (setting) => {
+              setting.addButton((btn) => {
+                btn.setButtonText("Set up sync");
+                btn.buttonEl.disabled = true;
+              });
+            },
+          },
+        ]),
+      ];
+    }
 
-    if (!authenticated) {
-      new Setting(this._syncEl)
-        .setName("Sync not configured")
-        .setDesc("Sign in to your Obsidian Sync account to set up sync.")
-        .addButton((btn) => {
-          btn.setButtonText("Set up sync");
-          btn.buttonEl.disabled = true;
-        });
+    if (vaultsError) {
+      return [
+        syncGroup(undefined, [
+          warningDefinition(`Failed to load sync state: ${vaultsError}`),
+        ]),
+      ];
+    }
 
-      return;
+    if (!vaults) {
+      return [syncGroup("Vault sync", [])];
     }
 
     const vaultId = this.app.vault.getName();
-
-    let vaultsData;
-
-    try {
-      vaultsData = await api.getVaults();
-    } catch (e) {
-      this._syncEl.createEl("p", {
-        text: `Failed to load sync state: ${e.message}`,
-        cls: "mod-warning",
-      });
-      return;
-    }
-
-    const vaultState = vaultsData.vaults.find((v) => v.vaultId === vaultId);
+    const vaultState = vaults.find((v) => v.vaultId === vaultId);
 
     if (!vaultState) {
-      new Setting(this._syncEl)
-        .setName("Sync not configured")
-        .setDesc("This vault has not been linked to a remote vault yet.")
-        .addButton((btn) => {
+      return [syncGroup("Vault sync", [this.syncSetupDefinition(vaultId)])];
+    }
+
+    const syncConfig = readSyncConfig(vaultState);
+
+    return [
+      syncGroup(
+        "Vault sync",
+        this.vaultSyncDefinitions(vaultId, vaultState, syncConfig),
+      ),
+      syncGroup("Selective sync", [
+        this.excludedFoldersDefinition(vaultId, syncConfig),
+        ...this.optionToggleDefinitions(
+          vaultId,
+          syncConfig,
+          "fileTypes",
+          FILE_TYPES,
+        ),
+      ]),
+      syncGroup(
+        "Vault configuration sync",
+        this.optionToggleDefinitions(
+          vaultId,
+          syncConfig,
+          "configs",
+          CONFIG_CATEGORIES,
+        ),
+      ),
+    ];
+  }
+
+  async saveSyncConfig(vaultId, syncConfig) {
+    try {
+      const { state, restarted } = await api.setConfig(vaultId, syncConfig);
+
+      new Notice(
+        restarted
+          ? "Sync settings saved, sync restarted"
+          : "Sync settings saved",
+      );
+      this.plugin.setVaultState(state);
+    } catch (e) {
+      new Notice(`Failed to save sync settings: ${e.message}`);
+      this.update();
+    }
+  }
+
+  syncSetupDefinition(vaultId) {
+    return {
+      name: "Sync not configured",
+      desc: "This vault has not been linked to a remote vault yet.",
+      render: (setting) => {
+        setting.addButton((btn) => {
           btn
             .setButtonText("Set up sync")
             .setCta()
@@ -209,7 +287,7 @@ class HeadlessSyncSettingTab extends PluginSettingTab {
                   onSuccess: async () => {
                     cleanup();
                     modal.$destroy();
-                    await this.renderSyncSection(true);
+                    await this.plugin.loadVaults();
                   },
                 },
               });
@@ -220,114 +298,170 @@ class HeadlessSyncSettingTab extends PluginSettingTab {
               });
             });
         });
-
-      return;
-    }
-
-    // Show current sync config
-    new Setting(this._syncEl)
-      .setName("Remote vault")
-      .setDesc(
-        vaultState.remoteVaultName || vaultState.remoteVault || "unknown",
-      )
-      .addButton((btn) => {
-        btn.setButtonText("Unlink");
-        btn.buttonEl.addClass("mod-destructive");
-        btn.onClick(async () => {
-          try {
-            await api.unlinkVault(vaultId);
-            new Notice("Vault unlinked");
-            await this.renderSyncSection(true);
-          } catch (e) {
-            new Notice(`Failed to unlink: ${e.message}`);
-          }
-        });
-      });
-
-    new Setting(this._syncEl)
-      .setName("Sync mode")
-      .setDesc(vaultState.config?.mode || "bidirectional");
-
-    // Sync controls
-    const controlsEl = this._syncEl.createDiv();
-    this.renderSyncControls(controlsEl, vaultId, vaultState);
-
-    // Log viewer - only render once, persists across sync section rebuilds
-    if (!this._logsRendered) {
-      await this.renderLogs(this._logsEl, vaultId);
-      this._logsRendered = true;
-    }
+      },
+    };
   }
 
-  async renderSyncControls(containerEl, vaultId, vaultState) {
-    containerEl.empty();
-
-    if (!vaultState) {
-      try {
-        const data = await api.getVaults();
-        vaultState = (data.vaults || []).find((v) => v.vaultId === vaultId);
-      } catch {
-        return;
-      }
-    }
-
-    if (!vaultState) {
-      return;
-    }
-
-    const statusText =
-      vaultState.status === "running"
-        ? "Sync is running"
-        : vaultState.status === "error"
-          ? `Error: ${vaultState.error}`
-          : "Sync is stopped";
-
-    new Setting(containerEl)
-      .setName("Status")
-      .setDesc(statusText)
-      .addButton((btn) => {
-        if (vaultState.status === "running") {
-          btn.setButtonText("Stop sync");
-          btn.buttonEl.addClass("mod-destructive");
-          btn.onClick(async () => {
-            try {
-              await api.stopSync(vaultId);
-              new Notice("Sync stopped");
-              this.renderSyncControls(containerEl, vaultId);
-            } catch (e) {
-              new Notice(`Failed to stop: ${e.message}`);
-            }
-          });
-        } else {
-          btn
-            .setButtonText("Start sync")
-            .setCta()
-            .onClick(async () => {
+  vaultSyncDefinitions(vaultId, vaultState, syncConfig) {
+    return [
+      {
+        name: "Remote vault",
+        desc: vaultState.remoteVaultName || vaultState.remoteVault || "unknown",
+        render: (setting) => {
+          setting.addButton((btn) => {
+            btn.setButtonText("Unlink");
+            btn.buttonEl.addClass("mod-destructive");
+            btn.onClick(async () => {
               try {
-                await api.startSync(vaultId);
-                new Notice("Sync started");
-                this.renderSyncControls(containerEl, vaultId);
+                await api.unlinkVault(vaultId);
+                new Notice("Vault unlinked");
+                await this.plugin.loadVaults();
               } catch (e) {
-                new Notice(`Failed to start: ${e.message}`);
+                new Notice(`Failed to unlink: ${e.message}`);
               }
             });
-        }
-      });
+          });
+        },
+      },
+      {
+        name: "Sync status",
+        desc: describeSyncStatus(vaultState),
+        render: (setting) => {
+          setting.addButton((btn) => {
+            if (vaultState.status === "running") {
+              btn.setButtonText("Stop sync");
+              btn.buttonEl.addClass("mod-destructive");
+              btn.onClick(async () => {
+                try {
+                  const { state } = await api.stopSync(vaultId);
+                  new Notice("Sync stopped");
+                  this.plugin.setVaultState(state);
+                } catch (e) {
+                  new Notice(`Failed to stop: ${e.message}`);
+                }
+              });
+            } else {
+              btn
+                .setButtonText("Start sync")
+                .setCta()
+                .onClick(async () => {
+                  try {
+                    const { state } = await api.startSync(vaultId);
+                    new Notice("Sync started");
+                    this.plugin.setVaultState(state);
+                  } catch (e) {
+                    new Notice(`Failed to start: ${e.message}`);
+                  }
+                });
+            }
+          });
+        },
+      },
+      {
+        name: "Sync mode",
+        render: (setting) => {
+          setting.addDropdown((dropdown) => {
+            for (const syncMode of SYNC_MODES) {
+              dropdown.addOption(syncMode.key, syncMode.name);
+            }
+
+            dropdown.setValue(syncConfig.mode).onChange(async (mode) => {
+              syncConfig.mode = mode;
+              await this.saveSyncConfig(vaultId, syncConfig);
+            });
+          });
+        },
+      },
+      {
+        name: "Sync log",
+        desc: "View recent sync activity.",
+        render: (setting) => {
+          setting.addButton((btn) => {
+            btn.setButtonText("View").onClick(() => {
+              new SyncLogModal(this.app, vaultId).open();
+            });
+          });
+        },
+      },
+    ];
   }
 
-  async renderLogs(containerEl, vaultId) {
-    this._logCleanup = await renderLogViewer(containerEl, vaultId);
+  excludedFoldersDefinition(vaultId, syncConfig) {
+    return {
+      name: "Excluded folders",
+      desc: describeExcludedFolders(syncConfig.excludedFolders.length),
+      render: (setting) => {
+        setting.addButton((btn) => {
+          btn.setButtonText("Manage").onClick(() => {
+            this.openExcludedFoldersEditor(vaultId, syncConfig);
+          });
+        });
+      },
+    };
+  }
+
+  optionToggleDefinitions(vaultId, syncConfig, field, options) {
+    return options.map((option) => ({
+      name: option.name,
+      desc: option.desc,
+      render: (setting) => {
+        setting.addToggle((toggle) => {
+          toggle
+            .setValue(syncConfig[field].includes(option.key))
+            .onChange(async (enabled) => {
+              syncConfig[field] = toggleKey(
+                options,
+                syncConfig[field],
+                option.key,
+                enabled,
+              );
+              await this.saveSyncConfig(vaultId, syncConfig);
+            });
+        });
+      },
+    }));
+  }
+
+  openExcludedFoldersEditor(vaultId, syncConfig) {
+    const folders = this.app.vault
+      .getAllFolders()
+      .map((folder) => folder.path)
+      .filter((path) => path && path !== "/");
+
+    const component = new window.IgnisUI.ExcludedFoldersEditor({
+      target: document.querySelector(".modal-container") || document.body,
+      props: {
+        folders,
+        excluded: syncConfig.excludedFolders,
+      },
+    });
+
+    let latest = syncConfig.excludedFolders;
+    let dirty = false;
+
+    component.$on("change", (event) => {
+      latest = event.detail;
+      dirty = true;
+    });
+
+    component.$on("close", async () => {
+      component.$destroy();
+
+      if (!dirty) {
+        return;
+      }
+
+      syncConfig.excludedFolders = latest;
+      await this.saveSyncConfig(vaultId, syncConfig);
+    });
   }
 
   hide() {
+    this._refreshedThisOpen = false;
+
     if (this._cancelWait) {
       this._cancelWait();
       this._cancelWait = null;
-    }
-
-    if (this._logCleanup) {
-      this._logCleanup();
-      this._logCleanup = null;
     }
 
     super.hide();

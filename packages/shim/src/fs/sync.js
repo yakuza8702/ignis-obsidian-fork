@@ -1,4 +1,4 @@
-import { markLocalOp } from "./echo-guard.js";
+import { markSentOp } from "./echo-guard.js";
 import { isInputCachePath, inputCacheGet } from "./input-cache.js";
 import {
   applyReadTransform,
@@ -7,7 +7,7 @@ import {
   resolvePathInfo,
 } from "./transforms.js";
 import { hasVirtualFile, getVirtualFile } from "./virtual-files.js";
-import { trackWrite } from "./write-durability.js";
+import { cancelPending, enqueueWrite, hasPending } from "./write-coalescer.js";
 import { createUtimes } from "./utimes.js";
 
 export function createFsSync(metadataCache, contentCache, transport) {
@@ -162,13 +162,21 @@ export function createFsSync(metadataCache, contentCache, transport) {
       const resolved = resolvePath(path);
       const transformed = applyWriteTransform(resolved, data);
 
-      markLocalOp(resolved);
       contentCache.set(resolved, transformed);
 
       const size =
         typeof transformed === "string"
           ? transformed.length
           : transformed.byteLength || 0;
+
+      const applyResult = (result) => {
+        metadataCache.set(resolved, {
+          type: "file",
+          size: result.size || size,
+          mtime: result.mtime,
+          ctime: metadataCache.get(resolved)?.ctime || Date.now(),
+        });
+      };
 
       metadataCache.set(resolved, {
         type: "file",
@@ -177,19 +185,20 @@ export function createFsSync(metadataCache, contentCache, transport) {
         ctime: metadataCache.get(resolved)?.ctime || Date.now(),
       });
 
-      // Fire-and-forget async send, tracked silently: retries with backoff and gives up without surfacing.
-      const track = trackWrite(resolved, { silent: true });
+      if (hasPending(resolved)) {
+        cancelPending(resolved);
+      }
 
-      transport.writeFile(resolved, transformed, encoding).then(
-        () => track.success(),
-        () => track.failure(transformed, encoding, null),
-      );
+      // Fire-and-forget.
+      enqueueWrite(resolved, transformed, encoding, applyResult, {
+        silent: true,
+      }).catch(() => {});
     },
 
     unlinkSync(path) {
       const resolved = resolvePath(path);
 
-      markLocalOp(resolved);
+      markSentOp(resolved);
       contentCache.delete(resolved);
       metadataCache.delete(resolved);
 
@@ -221,7 +230,7 @@ export function createFsSync(metadataCache, contentCache, transport) {
 
       const resolved = resolvePath(path);
 
-      markLocalOp(resolved);
+      markSentOp(resolved);
       metadataCache.set(resolved, { type: "directory" });
 
       transport.mkdir(resolved, recursive).catch((e) => {
@@ -236,7 +245,7 @@ export function createFsSync(metadataCache, contentCache, transport) {
     rmdirSync(path) {
       const resolved = resolvePath(path);
 
-      markLocalOp(resolved);
+      markSentOp(resolved);
       metadataCache.delete(resolved);
 
       transport.rmdir(resolved).catch((e) => {
@@ -254,7 +263,7 @@ export function createFsSync(metadataCache, contentCache, transport) {
 
       const resolved = resolvePath(path);
 
-      markLocalOp(resolved);
+      markSentOp(resolved);
       metadataCache.delete(resolved);
       contentCache.delete(resolved);
 
@@ -271,16 +280,19 @@ export function createFsSync(metadataCache, contentCache, transport) {
       const resolvedOld = resolvePath(oldPath);
       const resolvedNew = resolvePath(newPath);
 
-      markLocalOp(resolvedOld);
-      markLocalOp(resolvedNew);
+      markSentOp(resolvedOld);
+      markSentOp(resolvedNew);
+
+      for (const key of metadataCache.rename(resolvedOld, resolvedNew)) {
+        contentCache.delete(key);
+      }
+
       const content = contentCache.get(resolvedOld);
 
       if (content !== null) {
         contentCache.set(resolvedNew, content);
         contentCache.delete(resolvedOld);
       }
-
-      metadataCache.rename(resolvedOld, resolvedNew);
 
       transport.rename(resolvedOld, resolvedNew).catch((e) => {
         console.error(
@@ -295,7 +307,7 @@ export function createFsSync(metadataCache, contentCache, transport) {
       const resolvedSrc = resolvePath(src);
       const resolvedDest = resolvePath(dest);
 
-      markLocalOp(resolvedDest);
+      markSentOp(resolvedDest);
 
       // Optimistically mirror the source so a sync read right after sees it.
       const content = contentCache.get(resolvedSrc);
@@ -326,7 +338,7 @@ export function createFsSync(metadataCache, contentCache, transport) {
     appendFileSync(path, data) {
       const resolved = resolvePath(path);
 
-      markLocalOp(resolved);
+      markSentOp(resolved);
       contentCache.invalidate(resolved);
 
       transport
@@ -343,6 +355,10 @@ export function createFsSync(metadataCache, contentCache, transport) {
     },
 
     utimesSync(path, atime, mtime) {
+      commitUtimes(path, atime, mtime);
+    },
+
+    lutimesSync(path, atime, mtime) {
       commitUtimes(path, atime, mtime);
     },
 

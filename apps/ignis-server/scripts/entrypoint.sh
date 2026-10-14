@@ -1,6 +1,26 @@
 #!/bin/bash
 set -e
 
+# true when $1 is the same version as $2 or newer.
+version_at_least() {
+  [ "$(printf "%s\n%s\n" "$1" "$2" | sort -V | tail -n 1)" = "$1" ]
+}
+
+check_package_version() {
+  if [ -z "$1" ]; then
+    return
+  fi
+
+  if ! version_at_least "$1" "$OBSIDIAN_PIN"; then
+    echo "[ignis] ERROR: package is Obsidian $1, older than this build's Obsidian $OBSIDIAN_PIN. Use a package of $OBSIDIAN_PIN or newer, or an older Ignis image."
+    exit 1
+  fi
+
+  if [ "$1" != "$OBSIDIAN_PIN" ]; then
+    echo "[ignis] WARNING: package is Obsidian $1, but this build is pinned to $OBSIDIAN_PIN. The shim may misbehave."
+  fi
+}
+
 # Create user with specified UID/GID
 PUID=${PUID:-1000}
 PGID=${PGID:-1000}
@@ -31,14 +51,19 @@ for dir in /app/obsidian-app /app/data /vaults; do
 done
 
 OBSIDIAN_DIR="/app/obsidian-app"
-OBSIDIAN_VERSION="${OBSIDIAN_VERSION:-1.12.7}"
+OBSIDIAN_PIN="${IGNIS_OBSIDIAN_PIN:?IGNIS_OBSIDIAN_PIN is not set}"
 OBSIDIAN_STAMP="$OBSIDIAN_DIR/.obsidian-version"
 
-warn_obsidian_version() {
-  if [ -n "$1" ] && [ "$1" != "$OBSIDIAN_VERSION" ]; then
-    echo "[ignis] WARNING: package is Obsidian $1, but this build is pinned to ${OBSIDIAN_VERSION}. The shim may misbehave."
-  fi
-}
+# OBSIDIAN_VERSION may raise the pin, never lower it.
+if [ -z "$OBSIDIAN_VERSION" ] || [ "$OBSIDIAN_VERSION" = "$OBSIDIAN_PIN" ]; then
+  OBSIDIAN_VERSION="$OBSIDIAN_PIN"
+elif version_at_least "$OBSIDIAN_VERSION" "$OBSIDIAN_PIN"; then
+  echo "[ignis] WARNING: OBSIDIAN_VERSION=$OBSIDIAN_VERSION is newer than this build's Obsidian $OBSIDIAN_PIN. The shim may misbehave."
+else
+  echo "[ignis] OBSIDIAN_VERSION=$OBSIDIAN_VERSION is older than this build's Obsidian $OBSIDIAN_PIN; using $OBSIDIAN_PIN. Use an older Ignis image to run an older Obsidian."
+  OBSIDIAN_VERSION="$OBSIDIAN_PIN"
+fi
+
 
 installed_version=""
 if [ -f "$OBSIDIAN_STAMP" ]; then
@@ -59,11 +84,25 @@ if [ ! -f "$OBSIDIAN_DIR/index.html" ] || [ "$installed_version" != "$OBSIDIAN_V
       exit 1
     fi
 
+    case "$OBSIDIAN_PACKAGE" in
+      *.deb)
+        package_version="$(dpkg-deb -f "$OBSIDIAN_PACKAGE" Version 2>/dev/null)"
+        ;;
+      *.asar.gz | *.asar)
+        package_version="$(basename "$OBSIDIAN_PACKAGE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+        ;;
+      *)
+        echo "[ignis] ERROR: unsupported OBSIDIAN_PACKAGE format. Supported: .deb, .asar.gz, .asar"
+        exit 1
+        ;;
+    esac
+
+    check_package_version "$package_version"
+
     echo "[ignis] Unpacking local Obsidian package: $OBSIDIAN_PACKAGE"
 
     case "$OBSIDIAN_PACKAGE" in
       *.deb)
-        warn_obsidian_version "$(dpkg-deb -f "$OBSIDIAN_PACKAGE" Version 2>/dev/null)"
         rm -rf /tmp/ob-deb
         dpkg-deb -x "$OBSIDIAN_PACKAGE" /tmp/ob-deb
         npx --yes @electron/asar extract \
@@ -71,19 +110,13 @@ if [ ! -f "$OBSIDIAN_DIR/index.html" ] || [ "$installed_version" != "$OBSIDIAN_V
         rm -rf /tmp/ob-deb
         ;;
       *.asar.gz)
-        warn_obsidian_version "$(basename "$OBSIDIAN_PACKAGE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
         cp "$OBSIDIAN_PACKAGE" /tmp/obsidian.asar.gz
         gunzip -f /tmp/obsidian.asar.gz
         npx --yes @electron/asar extract /tmp/obsidian.asar "$OBSIDIAN_DIR"
         rm -f /tmp/obsidian.asar
         ;;
       *.asar)
-        warn_obsidian_version "$(basename "$OBSIDIAN_PACKAGE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
         npx --yes @electron/asar extract "$OBSIDIAN_PACKAGE" "$OBSIDIAN_DIR"
-        ;;
-      *)
-        echo "[ignis] ERROR: unsupported OBSIDIAN_PACKAGE format. Supported: .deb, .asar.gz, .asar"
-        exit 1
         ;;
     esac
   else

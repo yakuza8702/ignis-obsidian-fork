@@ -1,5 +1,6 @@
 const path = require("path");
 const fs = require("fs");
+const { toVaultRel } = require("@ignis/server-core");
 
 const REPO_ROOT = path.join(__dirname, "..", "..", "..");
 
@@ -78,6 +79,13 @@ function discoverVaults() {
 
 let vaults = discoverVaults();
 
+const RESCAN_MIN_INTERVAL_MS = 1000;
+let lastRescanAt = 0;
+
+function getVaultPath(id) {
+  return Object.prototype.hasOwnProperty.call(vaults, id) ? vaults[id] : null;
+}
+
 module.exports = {
   port: process.env.PORT || 8080,
   vaultRoot,
@@ -88,26 +96,53 @@ module.exports = {
   get defaultVaultId() {
     return Object.keys(vaults)[0] || null;
   },
-  getVaultPath(id) {
-    return vaults[id] || null;
+  getVaultPath,
+  getVaultPathOrRescan(id, now = Date.now()) {
+    const known = getVaultPath(id);
+
+    if (known || !id || now - lastRescanAt < RESCAN_MIN_INTERVAL_MS) {
+      return known;
+    }
+
+    lastRescanAt = now;
+    vaults = discoverVaults();
+
+    return getVaultPath(id);
+  },
+  // { vaultId, relPath } or null
+  vaultForPath(absPath) {
+    const target = path.resolve(absPath);
+
+    for (const [vaultId, vaultPath] of Object.entries(vaults)) {
+      const base = path.resolve(vaultPath);
+
+      if (target === base || target.startsWith(base + path.sep)) {
+        return {
+          vaultId,
+          relPath: toVaultRel(path.relative(base, target)),
+        };
+      }
+    }
+
+    return null;
   },
   refreshVaults() {
     vaults = discoverVaults();
     return vaults;
   },
 
-  demoMode: process.env.DEMO_MODE === "true",
-  demoMaxSessions: parseInt(process.env.DEMO_MAX_SESSIONS) || 20,
-  demoVaultsPerSession: parseInt(process.env.DEMO_VAULTS_PER_SESSION) || 3,
-  demoSessionQuotaBytes:
-    parseInt(process.env.DEMO_SESSION_QUOTA_BYTES) || 700 * 1024,
-  demoTimeoutMs: parseInt(process.env.DEMO_TIMEOUT_MS) || 30 * 60 * 1000,
-  demoTemplateDir:
-    process.env.DEMO_TEMPLATE_DIR || path.join(__dirname, "demo-template"),
+  // 0 = disabled
+  headlessSyncIdleRestartMs:
+    parseInt(process.env.HEADLESS_SYNC_IDLE_RESTART_MS) || 0,
+
+  devSuppressWriteFailures: process.env.DEV_SUPPRESS_WRITE_FAILURES === "true",
+  devForceReadingView: process.env.DEV_FORCE_READING_VIEW === "true",
 
   obsidianAssetsPath:
     process.env.OBSIDIAN_ASSETS_PATH ||
-    path.join(REPO_ROOT, "investigation", "obsidian_1.12.7_unpacked"),
+    path.join(REPO_ROOT, "investigation", "obsidian_1.14.4_unpacked"),
+
+  obsidianTermsOverride: process.env.OBSIDIAN_TERMS_STRING || "",
 
   get obsidianVersion() {
     // Read from the same path the assets are served from, so the version matches what ships.

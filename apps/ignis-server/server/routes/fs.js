@@ -5,19 +5,24 @@ const archiver = require("archiver");
 const config = require("../config");
 const {
   writeCoalescer,
+  watcher,
   encodeContentDispositionFilename,
   resolveVaultPath,
+  toVaultRel,
   sanitizeError,
+  creationTime,
 } = require("@ignis/server-core");
 const {
   writeCoalesced,
   getPending,
-  cancelPending,
+  estimateSize,
+  pendingBuffer,
   flushPending,
-  cancelPendingSubtree,
   flushPendingSubtree,
+  supersedePending,
+  supersedePendingSubtree,
 } = writeCoalescer;
-const bootstrapRoutes = require("./bootstrap");
+const bootstrapCache = require("../cache");
 
 const router = express.Router();
 
@@ -35,10 +40,79 @@ function getVaultRoot(req, res) {
   return vaultPath;
 }
 
-function invalidateBootstrap(req) {
-  if (req._vaultId) {
-    bootstrapRoutes.invalidateVault(req._vaultId);
+function toRelative(vaultRoot, resolved) {
+  return toVaultRel(path.relative(vaultRoot, resolved));
+}
+
+function isApplicable(event) {
+  return (
+    !watcher.isIgnoredPath(event.path) &&
+    !(event.toPath && watcher.isIgnoredPath(event.toPath))
+  );
+}
+
+// notify rename to or from ignored directory
+async function renameEvent(fromPath, toPath, toResolved) {
+  const fromIgnored = watcher.isIgnoredPath(fromPath);
+  const toIgnored = watcher.isIgnoredPath(toPath);
+
+  if (fromIgnored === toIgnored) {
+    return { type: "rename", path: fromPath, toPath };
   }
+
+  if (toIgnored) {
+    return { type: "deleted", path: fromPath };
+  }
+
+  const stat = await fs.promises.stat(toResolved).catch(() => null);
+
+  if (!stat) {
+    return [];
+  }
+
+  return stat.isDirectory()
+    ? { type: "folder-created", path: toPath }
+    : { type: "created", path: toPath };
+}
+
+async function applyToTree(req, events) {
+  if (!req._vaultId) {
+    return;
+  }
+
+  const vaultId = req._vaultId;
+  let batch = null;
+
+  try {
+    batch = [].concat(await events).filter(isApplicable);
+
+    if (batch.length === 0) {
+      return;
+    }
+
+    await bootstrapCache.applyMutation(vaultId, batch);
+  } catch (e) {
+    const paths = batch ? batch.map((event) => event.path).join(", ") : "";
+
+    console.warn(
+      `[bootstrap] route apply failed on vault ${vaultId}${paths ? ` for ${paths}` : ""}:`,
+      e.message,
+    );
+  }
+}
+
+async function bufferedWriteEvent(resolved, rel, result) {
+  const diskStat = await fs.promises.stat(resolved).catch(() => null);
+
+  return {
+    type: "modified",
+    path: rel,
+    stat: {
+      size: result.size,
+      mtime: result.mtime,
+      ctime: diskStat ? creationTime(diskStat) : result.mtime,
+    },
+  };
 }
 
 function guardPath(req, res, source = "query") {
@@ -81,15 +155,13 @@ router.get("/stat", async (req, res) => {
 
     if (buffered) {
       const diskStat = await fs.promises.stat(resolved).catch(() => null);
-      const size = Buffer.isBuffer(buffered.data)
-        ? buffered.data.length
-        : Buffer.byteLength(buffered.data, buffered.encoding || "utf-8");
+      const size = estimateSize(buffered.data, buffered.encoding);
 
       res.json({
         type: "file",
         size,
         mtime: Date.now(),
-        ctime: diskStat ? diskStat.ctimeMs : Date.now(),
+        ctime: diskStat ? creationTime(diskStat) : Date.now(),
       });
 
       return;
@@ -101,7 +173,7 @@ router.get("/stat", async (req, res) => {
       type: stat.isDirectory() ? "directory" : "file",
       size: stat.size,
       mtime: stat.mtimeMs,
-      ctime: stat.ctimeMs,
+      ctime: creationTime(stat),
     });
   } catch (e) {
     res.status(e.code === "ENOENT" ? 404 : 500).json(sanitizeError(e));
@@ -178,9 +250,17 @@ router.post("/writeFile", async (req, res) => {
     }
 
     const result = await writeCoalesced(resolved, data, encoding);
+    const rel = toRelative(req._vaultRoot, resolved);
+    const buffered = getPending(resolved) !== null;
 
-    invalidateBootstrap(req);
     res.json({ ok: true, mtime: result.mtime, size: result.size });
+
+    applyToTree(
+      req,
+      buffered
+        ? bufferedWriteEvent(resolved, rel, result)
+        : { type: "modified", path: rel },
+    );
   } catch (e) {
     res.status(500).json(sanitizeError(e));
   }
@@ -198,8 +278,11 @@ router.post("/appendFile", async (req, res) => {
     await flushPending(resolved);
     await fs.promises.appendFile(resolved, req.body.content, "utf-8");
 
-    invalidateBootstrap(req);
+    const rel = toRelative(req._vaultRoot, resolved);
+
     res.json({ ok: true });
+
+    applyToTree(req, { type: "modified", path: rel });
   } catch (e) {
     res.status(500).json(sanitizeError(e));
   }
@@ -214,13 +297,15 @@ router.post("/mkdir", async (req, res) => {
   }
 
   try {
-    await fs.promises.mkdir(resolved, {
-      recursive: !!req.body.recursive,
-    });
-    cancelPending(resolved);
+    await supersedePending(resolved, () =>
+      fs.promises.mkdir(resolved, { recursive: !!req.body.recursive }),
+    );
 
-    invalidateBootstrap(req);
+    const rel = toRelative(req._vaultRoot, resolved);
+
     res.json({ ok: true });
+
+    applyToTree(req, { type: "folder-created", path: rel });
   } catch (e) {
     res.status(500).json(sanitizeError(e));
   }
@@ -246,13 +331,22 @@ router.post("/rename", async (req, res) => {
   }
 
   try {
-    await flushPending(oldResolved);
-    await fs.promises.rename(oldResolved, newResolved);
+    await flushPendingSubtree(oldResolved);
     // Drop the destination's buffer so a stale write cannot land on the renamed file.
-    cancelPending(newResolved);
+    await supersedePending(newResolved, () =>
+      fs.promises.rename(oldResolved, newResolved),
+    );
 
-    invalidateBootstrap(req);
     res.json({ ok: true });
+
+    applyToTree(
+      req,
+      renameEvent(
+        toRelative(vaultRoot, oldResolved),
+        toRelative(vaultRoot, newResolved),
+        newResolved,
+      ),
+    );
   } catch (e) {
     res.status(500).json(sanitizeError(e));
   }
@@ -279,11 +373,16 @@ router.post("/copyFile", async (req, res) => {
 
   try {
     await flushPending(srcResolved);
-    await fs.promises.copyFile(srcResolved, destResolved);
-    cancelPending(destResolved);
+    await supersedePending(destResolved, () =>
+      fs.promises.copyFile(srcResolved, destResolved),
+    );
 
-    invalidateBootstrap(req);
     res.json({ ok: true });
+
+    applyToTree(req, {
+      type: "modified",
+      path: toRelative(vaultRoot, destResolved),
+    });
   } catch (e) {
     res.status(500).json(sanitizeError(e));
   }
@@ -297,20 +396,23 @@ router.delete("/unlink", async (req, res) => {
     return;
   }
 
-  try {
-    await fs.promises.unlink(resolved);
-    cancelPending(resolved);
+  const rel = toRelative(req._vaultRoot, resolved);
 
-    invalidateBootstrap(req);
+  try {
+    await supersedePending(resolved, () =>
+      fs.promises.unlink(resolved).catch((e) => {
+        // already gone counts as deleted
+        if (e.code !== "ENOENT") {
+          throw e;
+        }
+      }),
+    );
+
     res.json({ ok: true });
+
+    applyToTree(req, { type: "deleted", path: rel });
   } catch (e) {
-    if (e.code === "ENOENT") {
-      // File already gone; drop any buffered write so the flush cannot re-create it.
-      cancelPending(resolved);
-      res.json({ ok: true });
-    } else {
-      res.status(500).json(sanitizeError(e));
-    }
+    res.status(500).json(sanitizeError(e));
   }
 });
 
@@ -323,11 +425,13 @@ router.delete("/rmdir", async (req, res) => {
   }
 
   try {
-    await fs.promises.rmdir(resolved);
-    cancelPendingSubtree(resolved);
+    await supersedePendingSubtree(resolved, () => fs.promises.rmdir(resolved));
 
-    invalidateBootstrap(req);
+    const rel = toRelative(req._vaultRoot, resolved);
+
     res.json({ ok: true });
+
+    applyToTree(req, { type: "deleted", path: rel });
   } catch (e) {
     res.status(500).json(sanitizeError(e));
   }
@@ -342,17 +446,20 @@ router.delete("/rm", async (req, res) => {
   }
 
   try {
-    await fs.promises.rm(resolved, {
-      recursive: req.query.recursive === "true",
-    });
-    cancelPending(resolved);
+    const recursive = req.query.recursive === "true";
+    const remove = () => fs.promises.rm(resolved, { recursive });
 
-    if (req.query.recursive === "true") {
-      cancelPendingSubtree(resolved);
+    if (recursive) {
+      await supersedePendingSubtree(resolved, remove);
+    } else {
+      await supersedePending(resolved, remove);
     }
 
-    invalidateBootstrap(req);
+    const rel = toRelative(req._vaultRoot, resolved);
+
     res.json({ ok: true });
+
+    applyToTree(req, { type: "deleted", path: rel });
   } catch (e) {
     res.status(500).json(sanitizeError(e));
   }
@@ -383,16 +490,35 @@ router.post("/utimes", async (req, res) => {
   }
 
   try {
+    await flushPending(resolved);
     await fs.promises.utimes(
       resolved,
       req.body.atime / 1000,
       req.body.mtime / 1000,
     );
 
-    invalidateBootstrap(req);
-    res.json({ ok: true });
+    const stat = await fs.promises.stat(resolved);
+
+    if (stat.isDirectory()) {
+      res.json({ type: "directory" });
+      return;
+    }
+
+    const times = {
+      size: stat.size,
+      mtime: stat.mtimeMs,
+      ctime: creationTime(stat),
+    };
+
+    res.json({ type: "file", ...times });
+
+    applyToTree(req, {
+      type: "modified",
+      path: toRelative(req._vaultRoot, resolved),
+      stat: times,
+    });
   } catch (e) {
-    res.status(500).json(sanitizeError(e));
+    res.status(e.code === "ENOENT" ? 404 : 500).json(sanitizeError(e));
   }
 });
 
@@ -463,7 +589,7 @@ router.get("/tree", async (req, res) => {
 
   try {
     // grab the tree from the bootstrap cache.
-    const entry = await bootstrapRoutes.getOrBuild(req._vaultId);
+    const entry = await bootstrapCache.getOrBuild(req._vaultId);
 
     if (!entry) {
       return res.status(404).json({ error: "Vault not found" });
@@ -474,11 +600,6 @@ router.get("/tree", async (req, res) => {
 
     if (req.headers["if-none-match"] === entry.etag) {
       return res.status(304).end();
-    }
-
-    // The demo response rewriter mutates in place.
-    if (req._demoSessionId) {
-      return res.json(JSON.parse(JSON.stringify(entry.response.tree)));
     }
 
     res.json(entry.response.tree);
@@ -500,9 +621,7 @@ router.get("/download", async (req, res) => {
     const buffered = getPending(resolved);
 
     if (buffered) {
-      const body = Buffer.isBuffer(buffered.data)
-        ? buffered.data
-        : Buffer.from(buffered.data, buffered.encoding || "utf-8");
+      const body = pendingBuffer(buffered.data, buffered.encoding);
 
       res.setHeader(
         "Content-Disposition",

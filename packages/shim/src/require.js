@@ -4,6 +4,7 @@ import { fsShim } from "./fs/index.js";
 import { pathShim } from "./path.js";
 import { urlShim } from "./url.js";
 import { cryptoShim } from "./crypto/index.js";
+import { processShim } from "./process.js";
 import * as childProcessShim from "./node/child_process.js";
 import * as eventsShim from "./node/events.js";
 import * as osShim from "./node/os.js";
@@ -21,9 +22,11 @@ const rawRegistry = {
   "@electron/remote": remoteShim,
   "original-fs": fsShim,
   fs: fsShim,
+  "fs/promises": fsShim.promises,
   path: pathShim,
   url: urlShim,
   crypto: cryptoShim,
+  process: processShim,
   child_process: childProcessShim,
   events: eventsShim,
   os: osShim,

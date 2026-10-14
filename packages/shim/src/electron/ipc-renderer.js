@@ -8,6 +8,31 @@ const syncHandlers = {
   vault: () => window.__vaultConfig || { id: "default-vault", path: "/" },
   version: () => window.__obsidianVersion || "0.0.0",
   "is-dev": () => false,
+  "is-quitting": () => false,
+  "is-closing": () => false,
+  cli: () => false,
+  "set-language": () => null,
+
+  policy: () => ({
+    plugins: true,
+    themes: true,
+    snippets: true,
+    sync: true,
+    publish: true,
+    webViewer: true,
+    devTools: true,
+    insider: true,
+  }),
+
+  terms: () => {
+    if (!window.__obsidianTerms) {
+      console.error(
+        "[ignis] Obsidian asked for its terms handshake but the server extracted no value from this Obsidian version. Set OBSIDIAN_TERMS_STRING, or the terms extraction needs updating.",
+      );
+    }
+
+    return window.__obsidianTerms || null;
+  },
 
   "file-url": () =>
     "/vault-files/" + encodeURIComponent(window.__currentVaultId || "") + "/",
@@ -38,6 +63,7 @@ const syncHandlers = {
 
   "copy-asar": () => false,
   "check-update": () => null,
+  "latest-public-version": () => window.__obsidianVersion || null,
 
   "vault-list": () => {
     const result = {};

@@ -1,4 +1,4 @@
-import { setIcon } from "obsidian";
+import { SettingTab, setIcon } from "obsidian";
 
 function createNavEl(tab, setting) {
   const nav = document.createElement("div");
@@ -10,7 +10,11 @@ function createNavEl(tab, setting) {
 
     if (tab.icon.startsWith("<svg") || tab.icon.startsWith("<img")) {
       iconEl.innerHTML = tab.icon;
-    } else if (tab.icon.endsWith(".svg") || tab.icon.endsWith(".webp") || tab.icon.endsWith(".png")) {
+    } else if (
+      tab.icon.endsWith(".svg") ||
+      tab.icon.endsWith(".webp") ||
+      tab.icon.endsWith(".png")
+    ) {
       iconEl.innerHTML = `<img src="${tab.icon}" class="svg-icon" width="24" height="24" />`;
     } else {
       setIcon(iconEl, tab.icon);
@@ -35,28 +39,21 @@ function createNavEl(tab, setting) {
   return nav;
 }
 
-function createTab(id, name, displayFn, app, icon) {
-  const tab = {
-    id,
-    name,
-    icon: icon || null,
-    containerEl: createDiv("vertical-tab-content"),
-    navEl: null,
+class IgnisSettingTab extends SettingTab {
+  constructor(app, id, name, icon, definitions) {
+    super(app, app.setting);
+    this.id = id;
+    this.name = name;
+    this.icon = icon;
+    this.definitions = definitions;
+  }
 
-    display() {
-      this.containerEl.empty();
-      displayFn(this.containerEl, app);
-    },
-
-    hide() {
-      this.containerEl.empty();
-    },
-  };
-
-  return tab;
+  getSettingDefinitions() {
+    return this.definitions(this);
+  }
 }
 
-function createGroup(name) {
+function createGroup(name, section) {
   const group = document.createElement("div");
   group.className = "vertical-tab-header-group";
 
@@ -67,23 +64,36 @@ function createGroup(name) {
 
   const items = document.createElement("div");
   items.className = "vertical-tab-header-group-items";
+  items.setAttribute("data-section", section);
   group.appendChild(items);
 
   return { group, items };
 }
 
-function findGroupByTitle(tabHeadersEl, title) {
-  const groups = tabHeadersEl.querySelectorAll(".vertical-tab-header-group");
-
-  for (const g of groups) {
-    const t = g.querySelector(".vertical-tab-header-group-title");
-
-    if (t?.textContent === title) {
-      return g;
-    }
-  }
-
-  return null;
+function messageDefinition(text) {
+  return {
+    searchable: false,
+    render: (setting) => {
+      setting.settingEl.addClass("ignis-message");
+      setting.setDesc(text);
+    },
+  };
 }
 
-export { createNavEl, createTab, createGroup, findGroupByTitle };
+function blockDefinition(build) {
+  return {
+    searchable: false,
+    render: (setting) => {
+      setting.settingEl.empty();
+      build(setting.settingEl);
+    },
+  };
+}
+
+export {
+  IgnisSettingTab,
+  createNavEl,
+  createGroup,
+  messageDefinition,
+  blockDefinition,
+};

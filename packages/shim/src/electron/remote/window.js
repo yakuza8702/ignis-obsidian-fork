@@ -1,5 +1,9 @@
 import { getClipboard } from "./native-clipboard.js";
+import { webFrame } from "../web-frame.js";
 import { reportInsecureApi } from "../../util/insecure-api.js";
+
+const MIN_FRAME_ZOOM_LEVEL = -2.5;
+const MAX_FRAME_ZOOM_LEVEL = 3;
 
 const currentWindowState = {
   title: "Obsidian",
@@ -82,8 +86,15 @@ const currentWindow = {
   },
 
   setSize(width, height) {},
+  setMinimumSize(width, height) {},
   setPosition(x, y) {},
   center() {},
+
+  setFrameZoomLevel(level) {
+    webFrame.setZoomLevel(
+      Math.min(MAX_FRAME_ZOOM_LEVEL, Math.max(MIN_FRAME_ZOOM_LEVEL, level)),
+    );
+  },
 
   setTrafficLightPosition() {},
   setWindowButtonPosition() {},

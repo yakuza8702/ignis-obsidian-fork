@@ -10,10 +10,12 @@ import {
 } from "./workspace.js";
 import { prefetchVaultContent } from "./fs/indexer-prefetch.js";
 import { setInputCacheLimits } from "./fs/input-cache.js";
+import { setSilentByDefault } from "./fs/write-durability.js";
 import { setDirectFetchHosts } from "./util/url.js";
-import { autoTrustDemoVaults, maybeProvisionDemoVault } from "./demo.js";
-import { initNativeMenuGuard } from "./native-menu-guard.js";
-import { initSpellcheckGuard } from "./spellcheck-guard.js";
+import { initNativeMenuGuard } from "./guards/native-menu-guard.js";
+import { initSettingsWindowGuard } from "./guards/settings-window-guard.js";
+import { initSpellcheckGuard } from "./guards/spellcheck-guard.js";
+import { initPopoutGuard } from "./guards/popout-guard.js";
 
 let bootstrapVirtualPlugins = [];
 
@@ -31,16 +33,46 @@ function applyServerSettings(s) {
 
   setInputCacheLimits({ maxSize: s.inputCacheBytes, ttlMs: s.inputCacheTtlMs });
   setDirectFetchHosts(s.directFetchHosts);
+
+  window.__ignis.flags = {
+    suppressWriteFailures: s.devSuppressWriteFailures === true,
+    forceReadingView: s.devForceReadingView === true,
+  };
+
+  setSilentByDefault(window.__ignis.flags.suppressWriteFailures);
 }
 
 export function getBootstrapVirtualPlugins() {
   return bootstrapVirtualPlugins;
 }
 
-function resolveVaultId() {
+function fetchVaultInfo(vaultId) {
+  try {
+    const vaultParam = vaultId ? "?vault=" + encodeURIComponent(vaultId) : "";
+    const xhr = new XMLHttpRequest();
+
+    xhr.open("GET", "/api/vault/info" + vaultParam, false);
+    xhr.send();
+
+    if (xhr.status === 200) {
+      return JSON.parse(xhr.responseText);
+    }
+  } catch (e) {
+    console.error("[ignis] Failed to fetch vault config:", e);
+  }
+
+  return null;
+}
+
+export function resolveVaultId() {
   const urlParams = new URLSearchParams(window.location.search);
   window.__currentVaultId =
     urlParams.get("vault") || localStorage.getItem("last-vault") || "";
+
+  if (!window.__currentVaultId) {
+    const info = fetchVaultInfo("");
+    window.__currentVaultId = info ? info.id : "";
+  }
 
   const workspace = urlParams.get("workspace") || "";
   window.__workspaceName = isValidWorkspaceName(workspace) ? workspace : "";
@@ -83,6 +115,10 @@ function applyVaultInfo(info) {
     path: "/",
   };
 
+  if (info.trustPlugins) {
+    vaultService.setVaultTrust(info.id);
+  }
+
   console.log("[ignis] Vault:", window.__vaultConfig);
   console.log("[ignis] Obsidian version:", window.__obsidianVersion);
 }
@@ -100,23 +136,12 @@ function applyTree(tree) {
 }
 
 function initVaultConfigFallback() {
-  try {
-    const vaultParam = window.__currentVaultId
-      ? "?vault=" + encodeURIComponent(window.__currentVaultId)
-      : "";
+  const info = fetchVaultInfo(window.__currentVaultId);
 
-    const xhr = new XMLHttpRequest();
-
-    xhr.open("GET", "/api/vault/info" + vaultParam, false);
-    xhr.send();
-
-    if (xhr.status === 200) {
-      applyVaultInfo(JSON.parse(xhr.responseText));
-    } else {
-      console.warn("[ignis] No vault found, will show manager");
-    }
-  } catch (e) {
-    console.error("[ignis] Failed to fetch vault config:", e);
+  if (info) {
+    applyVaultInfo(info);
+  } else {
+    console.warn("[ignis] No vault found, will show manager");
   }
 }
 
@@ -237,15 +262,11 @@ function resolveWorkspaceAndAppearance() {
   resolveWorkspaceName();
   loadPresetIfRequested();
   initNativeMenuGuard();
+  initSettingsWindowGuard();
   initSpellcheckGuard();
 }
 
 export function initialize() {
-  if (maybeProvisionDemoVault()) {
-    window.__ignisBootReady = Promise.resolve();
-    return;
-  }
-
   resolveVaultId();
 
   const bootstrap = fetchBootstrap();
@@ -253,9 +274,8 @@ export function initialize() {
   if (bootstrap) {
     applyVaultInfo(bootstrap.vault);
     window.__vaultList = bootstrap.vaultList;
-    autoTrustDemoVaults(bootstrap.vaultList);
     applyTree(bootstrap.tree);
-    fsShim._watcherClient.setTreeRevision(bootstrap.treeRevision);
+    fsShim._watcherClient.setTreeEtag(bootstrap.etag);
     applyCoreSyncGuard(bootstrap.plugins);
     bootstrapVirtualPlugins = bootstrap.virtualPlugins || [];
     applyServerSettings(bootstrap.settings);
@@ -286,4 +306,5 @@ export function initialize() {
 
   installRequestUrlShim();
   initWorkspacePatch();
+  initPopoutGuard();
 }

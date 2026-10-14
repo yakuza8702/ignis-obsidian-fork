@@ -113,8 +113,7 @@ export function uninstallLoadingGate() {
     return;
   }
 
-  // Restore the original method.
-  delete MarkdownView.prototype.onLoadFile;
+  MarkdownView.prototype.onLoadFile = originalOnLoadFile;
 
   patched = false;
   originalOnLoadFile = null;

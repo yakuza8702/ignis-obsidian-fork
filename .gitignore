@@ -4,7 +4,6 @@ investigation/
 vaults/
 packages/*/dist/
 apps/ignis-server/server/build-info.json
-demo-vaults/
 data/
 
 # Local keys and credentials — never commit these.

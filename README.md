@@ -14,9 +14,12 @@
   </h3>
 
   <p align="center">
-    <a href="https://ignis-demo.thiefling.com">Try the live demo</a>
-    &middot;
     <a href="https://ignis.thiefling.com/docs/">Documentation</a>
+  </p>
+
+  <p align="center">
+    <a href="https://dev.thiefling.com/ignis/"><img src="https://img.shields.io/badge/-Follow_the_devlog-CF8E2C?logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIgPiA8cGF0aCBkPSJNMTMuNCAySDZhMiAyIDAgMCAwLTIgMnYxNmEyIDIgMCAwIDAgMiAyaDEyYTIgMiAwIDAgMCAyLTJ2LTcuNCIgLz4gPHBhdGggZD0iTTIgNmg0IiAvPiA8cGF0aCBkPSJNMiAxMGg0IiAvPiA8cGF0aCBkPSJNMiAxNGg0IiAvPiA8cGF0aCBkPSJNMiAxOGg0IiAvPiA8cGF0aCBkPSJNMjEuMzc4IDUuNjI2YTEgMSAwIDEgMC0zLjAwNC0zLjAwNGwtNS4wMSA1LjAxMmEyIDIgMCAwIDAtLjUwNi44NTRsLS44MzcgMi44N2EuNS41IDAgMCAwIC42Mi42MmwyLjg3LS44MzdhMiAyIDAgMCAwIC44NTQtLjUwNnoiIC8%2BIDwvc3ZnPg%3D%3D" alt="Follow development updates on the devlog"></a>
+    <a href="https://discord.gg/8pqQQj4my"><img src="https://img.shields.io/badge/-Join_the_server-5865F2?logo=discord&logoColor=white" alt="Join the Discord server"></a>
   </p>
 </section>
 
@@ -85,16 +88,20 @@ See the [documentation](https://ignis.thiefling.com/docs/) for the full feature 
 ## Limitations
 
 Running Obsidian in a browser means some Electron and Node capabilities have no equivalent, so certain plugins and features are limited or unavailable. See [Limitations](https://ignis.thiefling.com/docs/using/limitations/) and [Plugin compatibility](https://ignis.thiefling.com/docs/using/plugin-compatibility/) for details.
+
 ## Performance
 
 A few design decisions worth knowing about for someone evaluating Ignis against large vaults or slow storage:
 
 - A pre-compressed bootstrap response delivers vault info, vault list, metadata tree, and plugin list in a single call.
+- The vault file tree is kept up to date by live file events.
 - Indexer pre-fetch warms the content cache so Obsidian's startup index hits cache instead of the network.
 - An LRU content cache (50 MB by default) keeps memory use bounded regardless of vault size, so Ignis doesn't hold the whole vault in memory.
-- Optional write coalescing debounces rapid writes for slow filesystems (rclone, FUSE, NFS, SMB); off unless `WRITE_COALESCE_MS` is set.
+- Paths can be excluded from file watching to reduce watcher load on large vaults.
+- Write coalescing can be turned on to debounce rapid writes on slow filesystems such as rclone, FUSE, NFS, or SMB mounts. It is set with the 'Write coalesce window' setting or `WRITE_COALESCE_MS`.
 
-The content cache size and write coalescing can both be adjusted from the [Settings](https://ignis.thiefling.com/docs/using/settings/) panel.
+See [Settings](https://ignis.thiefling.com/docs/using/settings/) for more in-depth descriptions.
+
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, especially on how to report plugin compatibility issues. Check the [open issues](https://github.com/Nystik-gh/ignis/issues) for things to work on.

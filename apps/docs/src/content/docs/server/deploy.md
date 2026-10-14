@@ -87,6 +87,18 @@ On a read-only or NFS `root_squash` mount, Ignis cannot set ownership itself, so
 - Make the `PUID`/`PGID` user the owner of the folders on the host.
 - Export the NFS share with `no_root_squash`.
 
+### Read-only vaults
+
+To publish a vault that visitors can read but not modify, mount it read-only (`./vaults:/vaults:ro`) and set the two [dev flags](/docs/server/environment/#dev-flags):
+
+```yaml
+    environment:
+      - DEV_SUPPRESS_WRITE_FAILURES=true
+      - DEV_FORCE_READING_VIEW=true
+```
+
+Ignis does not enforce write protection in any way. **You must handle read-only permissions in the host filesystem or the Docker mount**; these flags only suppress warnings for failed writes and ensure the UI remains in reading view. Do not rely on these flags to protect your files from modification!
+
 ### Vaults on other mounts
 
 To include a vault stored elsewhere on the host, such as on a NAS mount, mount the folder into `/vaults` directly:
@@ -122,6 +134,8 @@ Ignis also watches every file in an open vault for changes, and the number of fi
 sysctl fs.inotify.max_user_watches=524288
 ```
 
+You can also exclude folders from being watched, see [Ignored paths](/docs/performance/#ignored-paths).
+
 ### Offline install
 
 If the container cannot reach the internet on first run, you can download the Obsidian `.deb` from [obsidian.md](https://obsidian.md/download) manually, mount it, and point `OBSIDIAN_PACKAGE` at it:
@@ -133,12 +147,8 @@ If the container cannot reach the internet on first run, you can download the Ob
       - OBSIDIAN_PACKAGE=/packages/obsidian.deb
 ```
 
-Ignis will unpack the local copy instead of downloading. It's recommended to match the Obsidian version the Ignis release pins.
+Ignis will unpack the local copy instead of downloading. The package must be the Obsidian version pinned by Ignis, or newer.
 
 ### Backups
 
 Your vaults are ordinary files under `vaults`. Back them up with whatever you use for other server data. Ignis has no built-in backup.
-
-### Running a public demo
-
-To run a public, throwaway demo instance instead of a private server, see [`examples/demo/`](https://github.com/Nystik-gh/ignis/tree/main/apps/ignis-server/examples/demo) in the repository.

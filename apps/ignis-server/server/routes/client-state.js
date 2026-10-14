@@ -3,6 +3,12 @@ const fs = require("fs");
 const path = require("path");
 const config = require("../config");
 
+// Demo mode was removed upstream (config.demoMode no longer exists), so read the
+// flag explicitly: undefined must mean "off", never "throw" or "truthy by accident".
+// The 403 guards below are kept (intent: a shared mirror would leak one visitor's
+// trust/vault selection to another in a multi-visitor demo deployment).
+const demoMode = config.demoMode === true;
+
 // Server-backed mirror of the small set of browser localStorage keys that
 // Obsidian/Ignis rely on for cross-session behavior. Clearing browser data
 // wipes localStorage; this mirror lets the client rehydrate those keys on the
@@ -84,7 +90,7 @@ function saveState(state) {
 router.get("/", (req, res) => {
   // In demo mode, shared client-state would leak one visitor's trust/vault
   // selection to another. Demo pre-trusts vaults client-side instead.
-  if (config.demoMode) {
+  if (demoMode) {
     return res.status(403).json({ error: "Disabled in demo mode" });
   }
 
@@ -92,7 +98,7 @@ router.get("/", (req, res) => {
 });
 
 router.post("/", (req, res) => {
-  if (config.demoMode) {
+  if (demoMode) {
     return res.status(403).json({ error: "Disabled in demo mode" });
   }
 
@@ -140,7 +146,7 @@ router.post("/", (req, res) => {
 
 // Delete the whole mirror (e.g. a user deliberately resetting trust).
 router.delete("/", (req, res) => {
-  if (config.demoMode) {
+  if (demoMode) {
     return res.status(403).json({ error: "Disabled in demo mode" });
   }
 

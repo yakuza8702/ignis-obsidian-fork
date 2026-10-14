@@ -4,8 +4,11 @@ const { setupWebSocket } = require("./ws");
 const {
   encodeContentDispositionFilename,
   resolveVaultPath,
+  toVaultRel,
+  fromVaultRel,
 } = require("./path-utils");
 const { sanitizeError } = require("./errors");
+const { creationTime } = require("./file-times");
 
 module.exports = {
   writeCoalescer,
@@ -13,5 +16,8 @@ module.exports = {
   setupWebSocket,
   encodeContentDispositionFilename,
   resolveVaultPath,
+  toVaultRel,
+  fromVaultRel,
   sanitizeError,
+  creationTime,
 };

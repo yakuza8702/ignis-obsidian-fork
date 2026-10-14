@@ -1,8 +1,84 @@
+.setting-group.ignis-plain .setting-items {
+  background-color: transparent;
+  border: none;
+}
+
+.setting-group.ignis-plain .setting-item {
+  padding: 0;
+}
+
+.ignis-header-block {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.ignis-header-block .ignis-header {
+  align-self: stretch;
+}
+
+.is-phone .modal .setting-group .setting-item.ignis-status-setting {
+  flex-direction: row;
+  align-items: center;
+}
+
+.is-phone
+  .modal
+  .setting-group
+  .setting-item.ignis-status-setting
+  .setting-item-control {
+  width: auto;
+}
+
+.ignis-header-block .ignis-header-links {
+  align-self: stretch;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--size-4-3);
+  margin: 0;
+}
+
+.ignis-header-text-link {
+  font-size: var(--font-ui-small);
+  color: #a0a0a0;
+  opacity: 0.6;
+  text-decoration: none;
+}
+
+.ignis-header-text-link:hover {
+  color: var(--text-normal);
+  opacity: 1;
+}
+
+.ignis-header-links-separator {
+  width: 1px;
+  height: 16px;
+  background-color: var(--background-modifier-border);
+}
+
+.ignis-header-link-icon {
+  display: block;
+  width: 20px;
+  height: 20px;
+  filter: brightness(0) invert(0.63);
+  opacity: 0.6;
+}
+
+.ignis-header-link:hover .ignis-header-link-icon {
+  filter: none;
+  opacity: 1;
+}
+
+.ignis-message .setting-item-description {
+  font-size: var(--font-ui-small);
+}
+
 .ignis-header {
+  flex: 1;
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 16px 0 12px;
+  padding: 0 0 12px;
   margin-bottom: 12px;
   border-bottom: 1px solid var(--background-modifier-border);
 }
@@ -52,6 +128,8 @@
 }
 
 .ignis-update-indicator {
+  min-width: 10em;
+  text-align: right;
   font-size: var(--font-ui-smaller);
   color: var(--text-faint);
   text-decoration: none;
@@ -86,6 +164,7 @@
 }
 
 .ignis-insecure-callout {
+  flex: 1;
   display: flex;
   gap: 12px;
   padding: 12px 14px;
@@ -212,6 +291,13 @@
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .ignis-statusbar-writes-pending {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
 .ignis-write-failure-actions {
   display: flex;
   gap: 8px;
@@ -242,20 +328,18 @@
   z-index: 20;
 }
 
-.ignis-plugins-description {
-  padding: 0 16px;
-  color: var(--text-muted);
-  font-size: var(--font-ui-small);
-  margin-bottom: 16px;
-}
-
 .ignis-list-editor {
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--radius-m);
   max-height: 220px;
   overflow-y: auto;
-  padding: 0 var(--size-4-3);
+  scrollbar-gutter: stable;
+  padding: var(--size-4-2) var(--size-4-3);
   margin-bottom: var(--size-4-4);
+}
+
+.ignis-list-editor .setting-item {
+  padding: var(--size-4-2) 0;
 }
 
 .ignis-list-empty {

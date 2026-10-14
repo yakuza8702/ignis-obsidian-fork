@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { createFsSync } from "./sync.js";
 import { resolvePath, registerPathResolver, _reset } from "./transforms.js";
-import { isRecentLocalOp } from "./echo-guard.js";
+import { isRecentSentOp } from "./echo-guard.js";
+import { MetadataCache } from "./metadata-cache.js";
+import { ContentCache } from "./content-cache.js";
 
 function makeDeps() {
   const store = new Map();
@@ -16,6 +18,8 @@ function makeDeps() {
         store.set(b, store.get(a));
         store.delete(a);
       }
+
+      return [];
     },
     toStat: (p) =>
       store.has(p)
@@ -113,6 +117,24 @@ describe("sync fs mutations", () => {
     expect(deps.transport.rename).toHaveBeenCalled();
   });
 
+  it("renameSync drops the content the destination held", () => {
+    const metadataCache = new MetadataCache();
+    const contentCache = new ContentCache();
+    const transport = { rename: vi.fn(async () => {}) };
+    const fs = createFsSync(metadataCache, contentCache, transport);
+    const from = resolvePath("src.md");
+    const to = resolvePath("dst.md");
+
+    metadataCache.set(from, { type: "file", size: 3 });
+    metadataCache.set(to, { type: "file", size: 5 });
+    contentCache.set(to, "stale");
+
+    fs.renameSync("src.md", "dst.md");
+
+    expect(contentCache.get(to)).toBeNull();
+    expect(metadataCache.get(to)).toEqual({ type: "file", size: 3 });
+  });
+
   it("copyFileSync optimistically mirrors source metadata and fires the transport", () => {
     const deps = makeDeps();
     const fs = createFsSync(
@@ -130,7 +152,7 @@ describe("sync fs mutations", () => {
     expect(deps.transport.copyFile).toHaveBeenCalled();
   });
 
-  it("utimesSync sets mtime and fires the transport", () => {
+  it("utimesSync sets mtime and fires the transport", async () => {
     const deps = makeDeps();
     const fs = createFsSync(
       deps.metadataCache,
@@ -141,23 +163,25 @@ describe("sync fs mutations", () => {
     deps.store.set(key, { type: "file", mtime: 0 });
 
     fs.utimesSync("note.md", 111, 222);
+    await new Promise((r) => setTimeout(r, 0));
 
     expect(deps.store.get(key).mtime).toBe(222000);
     expect(deps.transport.utimes).toHaveBeenCalledWith(key, 111000, 222000);
   });
 
-  it("utimesSync converts a Date argument to milliseconds", () => {
+  it("utimesSync converts a Date argument to milliseconds", async () => {
     const deps = makeDeps();
     const fs = createFsSync(
       deps.metadataCache,
       deps.contentCache,
       deps.transport,
     );
-    const key = resolvePath("note.md");
+    const key = resolvePath("dated.md");
     deps.store.set(key, { type: "file", mtime: 0 });
 
     const when = new Date(1783339200000);
-    fs.utimesSync("note.md", when, when);
+    fs.utimesSync("dated.md", when, when);
+    await new Promise((r) => setTimeout(r, 0));
 
     expect(deps.store.get(key).mtime).toBe(1783339200000);
     expect(deps.transport.utimes).toHaveBeenCalledWith(
@@ -189,8 +213,8 @@ describe("directory mutations honor path resolvers", () => {
     expect(deps.store.get("physical/dir")).toEqual({ type: "directory" });
     expect(deps.store.has("logical/dir")).toBe(false);
     expect(deps.transport.mkdir).toHaveBeenCalledWith("physical/dir", true);
-    expect(isRecentLocalOp("physical/dir")).toBe(true);
-    expect(isRecentLocalOp("logical/dir")).toBe(false);
+    expect(isRecentSentOp("physical/dir")).toBe(true);
+    expect(isRecentSentOp("logical/dir")).toBe(false);
   });
 
   it("rmdirSync uses the resolved path for cache, echo-guard, and transport", () => {
@@ -211,7 +235,7 @@ describe("directory mutations honor path resolvers", () => {
 
     expect(deps.store.has("physical/dir")).toBe(false);
     expect(deps.transport.rmdir).toHaveBeenCalledWith("physical/dir");
-    expect(isRecentLocalOp("physical/dir")).toBe(true);
+    expect(isRecentSentOp("physical/dir")).toBe(true);
   });
 });
 

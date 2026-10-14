@@ -33,26 +33,33 @@ export class MetadataCache {
     this._entries.delete(this._normalize(path));
   }
 
-  // Rename: move metadata from old path to new path (and children if directory)
+  deleteSubtree(path) {
+    const removed = this._subtree(this._normalize(path)).map(([key]) => key);
+
+    for (const key of removed) {
+      this._entries.delete(key);
+    }
+
+    return removed;
+  }
+
   rename(oldPath, newPath) {
     const oldNorm = this._normalize(oldPath);
     const newNorm = this._normalize(newPath);
-    const meta = this._entries.get(oldNorm);
 
-    if (meta) {
-      this._entries.delete(oldNorm);
-      this._entries.set(newNorm, meta);
+    if (oldNorm === newNorm) {
+      return [];
     }
 
-    // Move children
-    const prefix = oldNorm + "/";
-    for (const [key, val] of this._entries) {
-      if (key.startsWith(prefix)) {
-        const newKey = newNorm + "/" + key.slice(prefix.length);
-        this._entries.delete(key);
-        this._entries.set(newKey, val);
-      }
+    const moved = this._subtree(oldNorm);
+    const cleared = this.deleteSubtree(newNorm);
+
+    for (const [key, val] of moved) {
+      this._entries.delete(key);
+      this._entries.set(newNorm + key.slice(oldNorm.length), val);
     }
+
+    return cleared;
   }
 
   // List direct children of a directory path
@@ -101,11 +108,11 @@ export class MetadataCache {
     return {
       size: meta.size || 0,
       mtimeMs: meta.mtime || 0,
-      ctimeMs: meta.ctime || 0,
+      ctimeMs: meta.mtime || 0, // ctimeMs (POSIX inode) must be set to mtime since meta.ctime is creation time not inode.
       atimeMs: meta.mtime || 0,
       birthtimeMs: meta.ctime || 0,
       mtime: new Date(meta.mtime || 0),
-      ctime: new Date(meta.ctime || 0),
+      ctime: new Date(meta.mtime || 0),
       atime: new Date(meta.mtime || 0),
       birthtime: new Date(meta.ctime || 0),
       isFile: () => meta.type === "file",
@@ -116,6 +123,14 @@ export class MetadataCache {
       isFIFO: () => false,
       isSocket: () => false,
     };
+  }
+
+  _subtree(norm) {
+    const prefix = norm + "/";
+
+    return [...this._entries].filter(
+      ([key]) => key === norm || key.startsWith(prefix),
+    );
   }
 
   _normalize(p) {

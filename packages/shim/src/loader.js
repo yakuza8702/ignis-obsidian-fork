@@ -4,6 +4,8 @@ import { installCssOverrides } from "./css-overrides.js";
 import { installEmulateMobile } from "./emulate-mobile.js";
 import { installMobileVaultSwitcher } from "./mobile-vault-switcher.js";
 import { installOpenFileParam } from "./open-file-param.js";
+import { installPopoutOverrides } from "./guards/popout-guard.js";
+import { installExternalFilesOverrides } from "./guards/external-files-guard.js";
 import { initialize, getBootstrapVirtualPlugins } from "./init.js";
 import { installClientStateMirror } from "./client-state.js";
 import { fsShim } from "./fs/index.js";
@@ -46,7 +48,7 @@ const BRIDGE_MANIFEST = {
   id: "ignis-bridge",
   name: "Ignis Bridge",
   version: __IGNIS_VERSION__,
-  minAppVersion: "1.12.4",
+  minAppVersion: "1.13.0",
   description:
     "Additional Ignis specific functionality and ignis plugin management.",
   author: "Nystik",
@@ -90,7 +92,7 @@ wsClient.subscribe("write-giveup", (msg) => {
 });
 
 extractObsidianModule()
-  .then(async () => {
+  .then(async (obsidian) => {
     // window.app exists once Obsidian's module is extracted.
     if (
       window.app &&
@@ -98,6 +100,11 @@ extractObsidianModule()
       window.app.workspace.onLayoutReady
     ) {
       window.app.workspace.onLayoutReady(onLayoutReady);
+    }
+
+    if (obsidian) {
+      installPopoutOverrides(obsidian);
+      installExternalFilesOverrides(obsidian, window.app);
     }
 
     installMobileVaultSwitcher(window.app);

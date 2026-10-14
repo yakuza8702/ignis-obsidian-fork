@@ -39,6 +39,9 @@ const lastWriteTime = new Map();
 // absPath -> { data, encoding, timer, attempts }
 const pending = new Map();
 
+// absPath -> { write, tail } queued write, promise that resolves when queue finished.
+const inFlight = new Map();
+
 // Set<fn(absPath, error)>
 const giveUpSubs = new Set();
 
@@ -61,6 +64,28 @@ function emitGiveUp(absPath, err) {
   }
 }
 
+// Set<fn(absPath)>
+const flushSuccessSubs = new Set();
+
+// fn(absPath) runs when a buffered write reaches disk.
+function onFlushSuccess(fn) {
+  flushSuccessSubs.add(fn);
+
+  return () => {
+    flushSuccessSubs.delete(fn);
+  };
+}
+
+function emitFlushSuccess(absPath) {
+  for (const fn of flushSuccessSubs) {
+    try {
+      fn(absPath);
+    } catch (e) {
+      console.error("[write-coalesce] flush-success subscriber threw:", e);
+    }
+  }
+}
+
 async function writeToDisk(absPath, data, encoding) {
   await fs.promises.writeFile(
     absPath,
@@ -78,8 +103,39 @@ async function writeToDisk(absPath, data, encoding) {
   }
 }
 
+function queueDiskWrite(absPath, write) {
+  const previous = inFlight.get(absPath)?.tail || Promise.resolve();
+  const result = previous
+    .then(() => writeToDisk(absPath, write.data, write.encoding))
+    .finally(() => {
+      if (inFlight.get(absPath)?.write === write) {
+        inFlight.delete(absPath);
+      }
+    });
+
+  inFlight.set(absPath, { write, tail: result.catch(() => {}) });
+
+  return result;
+}
+
+function isRetry(entry) {
+  return entry.attempts > 0;
+}
+
+function isAtOrUnder(absPath, absDir) {
+  const prefix = absDir.endsWith(path.sep) ? absDir : absDir + path.sep;
+
+  return absPath === absDir || absPath.startsWith(prefix);
+}
+
+function inFlightTails(isTarget) {
+  return [...inFlight]
+    .filter(([absPath]) => isTarget(absPath))
+    .map(([, { tail }]) => tail);
+}
+
 function requeueFailed(absPath, entry, err) {
-  if (pending.has(absPath)) {
+  if (pending.has(absPath) || inFlight.has(absPath)) {
     // A newer write is already buffered for this path.
     return;
   }
@@ -118,12 +174,14 @@ function flushEntry(absPath) {
 
   clearTimeout(entry.timer);
   pending.delete(absPath);
-  const { data, encoding } = entry;
 
-  writeToDisk(absPath, data, encoding).catch((err) => {
-    console.error(`[write-coalesce] Flush failed for ${absPath}:`, err);
-    requeueFailed(absPath, entry, err);
-  });
+  queueDiskWrite(absPath, entry).then(
+    () => emitFlushSuccess(absPath),
+    (err) => {
+      console.error(`[write-coalesce] Flush failed for ${absPath}:`, err);
+      requeueFailed(absPath, entry, err);
+    },
+  );
 }
 
 function scheduleFlush(absPath) {
@@ -145,6 +203,14 @@ function estimateSize(data, encoding) {
   return data.length || data.byteLength || 0;
 }
 
+function pendingBuffer(data, encoding) {
+  if (typeof data === "string") {
+    return Buffer.from(data, encoding === "binary" ? "utf-8" : encoding);
+  }
+
+  return Buffer.isBuffer(data) ? data : Buffer.from(data);
+}
+
 /**
  * Write file content, coalescing rapid writes.
  * Fresh writes resolve with real mtime/size once data is on disk. Buffered writes resolve immediately with synthetic values; the disk flush happens later when the debounce timer fires.
@@ -160,37 +226,24 @@ async function writeCoalesced(absPath, data, encoding) {
       pending.delete(absPath);
     }
 
-    return writeToDisk(absPath, data, encoding);
+    return queueDiskWrite(absPath, { data, encoding });
   }
 
   // Within the coalesce window: buffer the write and respond immediately.
   const existing = pending.get(absPath);
 
   if (existing) {
-    existing.data = data;
-    existing.encoding = encoding;
-    existing.attempts = 0; // reset attempts for fresh data.
-
-    scheduleFlush(absPath);
-  } else {
-    pending.set(absPath, {
-      data,
-      encoding,
-      timer: null,
-      attempts: 0,
-    });
-    scheduleFlush(absPath);
+    clearTimeout(existing.timer);
   }
+
+  pending.set(absPath, { data, encoding, timer: null, attempts: 0 });
+  scheduleFlush(absPath);
 
   return { mtime: Date.now(), size: estimateSize(data, encoding) };
 }
 
-/**
- * Get pending (not yet flushed) data for a path, or null.
- * Used by readFile to serve buffered content instead of stale disk data.
- */
 function getPending(absPath) {
-  const entry = pending.get(absPath);
+  const entry = pending.get(absPath) || inFlight.get(absPath)?.write;
 
   if (entry) {
     return { data: entry.data, encoding: entry.encoding };
@@ -199,68 +252,96 @@ function getPending(absPath) {
   return null;
 }
 
-function cancelPending(absPath) {
-  const entry = pending.get(absPath);
-
-  if (!entry) {
-    return false;
-  }
-
-  clearTimeout(entry.timer);
-  pending.delete(absPath);
-  return true;
+function pendingPaths() {
+  return [...new Set([...pending.keys(), ...inFlight.keys()])];
 }
 
 async function flushPending(absPath) {
   const entry = pending.get(absPath);
 
   if (!entry) {
+    await inFlight.get(absPath)?.tail;
     return false;
   }
 
   clearTimeout(entry.timer);
   pending.delete(absPath);
-  const { data, encoding } = entry;
 
   try {
-    await writeToDisk(absPath, data, encoding);
-    return true;
+    await queueDiskWrite(absPath, entry);
   } catch (e) {
     requeueFailed(absPath, entry, e);
     throw e;
   }
-}
 
-function cancelPendingSubtree(absDir) {
-  const prefix = absDir.endsWith(path.sep) ? absDir : absDir + path.sep;
-  let dropped = 0;
+  emitFlushSuccess(absPath);
 
-  for (const [absPath, entry] of pending) {
-    if (absPath === absDir || absPath.startsWith(prefix)) {
-      clearTimeout(entry.timer);
-      pending.delete(absPath);
-      dropped++;
-    }
-  }
-
-  return dropped;
+  return true;
 }
 
 async function flushPendingSubtree(absDir) {
-  const prefix = absDir.endsWith(path.sep) ? absDir : absDir + path.sep;
-  const targets = [];
-
-  for (const absPath of pending.keys()) {
-    if (absPath === absDir || absPath.startsWith(prefix)) {
-      targets.push(absPath);
-    }
-  }
+  const isTarget = (absPath) => isAtOrUnder(absPath, absDir);
+  const targets = [...pending.keys()].filter(isTarget);
 
   for (const absPath of targets) {
     await flushPending(absPath);
   }
 
+  await Promise.all(inFlightTails(isTarget));
+
   return targets.length;
+}
+
+async function supersede(isTarget, op) {
+  const paused = new Map();
+  const pause = (absPath, entry) => {
+    clearTimeout(entry.timer);
+    paused.set(absPath, entry);
+  };
+
+  for (const [absPath, entry] of pending) {
+    if (isTarget(absPath)) {
+      pause(absPath, entry);
+    }
+  }
+
+  await Promise.all(inFlightTails(isTarget));
+
+  // pause queued retry entries
+  for (const [absPath, entry] of pending) {
+    if (isTarget(absPath) && isRetry(entry) && !paused.has(absPath)) {
+      pause(absPath, entry);
+    }
+  }
+
+  const unchanged = () =>
+    [...paused].filter(([absPath, entry]) => pending.get(absPath) === entry);
+
+  let result;
+
+  try {
+    result = await op();
+  } catch (e) {
+    for (const [absPath] of unchanged()) {
+      scheduleFlush(absPath);
+    }
+
+    throw e;
+  }
+
+  for (const [absPath] of unchanged()) {
+    pending.delete(absPath);
+  }
+
+  return result;
+}
+
+function supersedePending(absPath, op) {
+  return supersede((p) => p === absPath, op);
+}
+
+function supersedePendingSubtree(absDir, op) {
+  return supersede((p) => isAtOrUnder(p, absDir), op);
 }
 
 /**
@@ -268,12 +349,15 @@ async function flushPendingSubtree(absDir) {
  */
 async function flushAll() {
   const paths = [...pending.keys()];
+  const writing = [...inFlight.values()].map(({ tail }) => tail);
 
-  if (paths.length === 0) {
+  if (paths.length === 0 && writing.length === 0) {
     return;
   }
 
-  console.log(`[write-coalesce] Flushing ${paths.length} pending write(s)...`);
+  console.log(
+    `[write-coalesce] Flushing ${paths.length} pending write(s), ${writing.length} in flight...`,
+  );
 
   for (const entry of pending.values()) {
     clearTimeout(entry.timer);
@@ -283,9 +367,12 @@ async function flushAll() {
     const entry = pending.get(absPath);
     pending.delete(absPath);
 
-    return writeToDisk(absPath, entry.data, entry.encoding).catch((err) => {
-      console.error(`[write-coalesce] Failed to flush ${absPath}:`, err);
-    });
+    return queueDiskWrite(absPath, entry).then(
+      () => emitFlushSuccess(absPath),
+      (err) => {
+        console.error(`[write-coalesce] Failed to flush ${absPath}:`, err);
+      },
+    );
   });
 
   const timeout = new Promise((resolve) => {
@@ -295,7 +382,7 @@ async function flushAll() {
     }, FLUSH_TIMEOUT_MS);
   });
 
-  await Promise.race([Promise.allSettled(writes), timeout]);
+  await Promise.race([Promise.allSettled([...writes, ...writing]), timeout]);
 }
 
 // Test-only: clear all internal state. Not exported for production use.
@@ -304,19 +391,25 @@ function _reset() {
     clearTimeout(entry.timer);
   }
   pending.clear();
+  inFlight.clear();
   lastWriteTime.clear();
   giveUpSubs.clear();
+  flushSuccessSubs.clear();
 }
 
 module.exports = {
   writeCoalesced,
   getPending,
-  cancelPending,
+  estimateSize,
+  pendingBuffer,
+  pendingPaths,
   flushPending,
-  cancelPendingSubtree,
   flushPendingSubtree,
+  supersedePending,
+  supersedePendingSubtree,
   flushAll,
   onFlushGiveUp,
+  onFlushSuccess,
   configure,
   _reset,
 };

@@ -2,6 +2,99 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.17] - Karm (2026-10-11)
+
+### Added
+
+- Docs, community, and support links in Ignis settings.
+- `fs/promises` shim.
+
+### Changed
+
+- Obsidian pinned at 1.14.4.
+
+### Fixed
+
+- Bottom navigation is no longer cut off on phones.
+- The mobile editor toolbar stays above the keyboard.
+- Long-pressing text on mobile shows the browser's copy and paste menu.
+- Ignis settings tab displays properly on phones.
+
+## [0.8.16] - Karm (2026-10-04)
+
+### Changed
+
+- Opening a note in a new window opens it in a tab.
+- Ignore rules are saved as you edit them, and suggestions already covered by a rule are hidden.
+- Refresh vault from disk updates the file explorer immediately.
+- Improved spacing in list editors, and the save indicator respects reduced motion.
+
+### Fixed
+
+- Edits made while the server is unreachable are no longer reverted when it reconnects.
+- With write coalescing on, a file deleted right after saving stays deleted.
+- `fs.utimes` works when called right after a write.
+- `fs.stat` reports `ctimeMs` correctly.
+- Headless Sync status spinner shows a more accurate state.
+- Ignis plugin settings tabs no longer go missing from Settings after a reload.
+- Enabling an Ignis plugin takes effect on the next reload.
+- A vault folder created outside the vault manager loads correctly on its first open.
+
+### Removed
+
+- Demo mode and its `DEMO_*` variables.
+
+## [0.8.15] - Karm (2026-10-01)
+
+### Fixed
+
+- File creation time is preserved.
+
+## [0.8.14] - Karm (2026-09-27)
+
+### Fixed
+
+- Vaults with pop-out windows in their saved layout no longer break on load.
+- Zoom handled properly.
+
+## [0.8.13] - Karm (2026-09-25)
+
+### Changed
+
+- Obsidian pinned at 1.13.7.
+- `OBSIDIAN_VERSION` and `OBSIDIAN_PACKAGE` only accept the pinned Obsidian version or newer.
+- Ignis and Headless Sync settings tabs render without a loading step.
+- Settings reopen on the last viewed Ignis tab.
+
+## [0.8.12] - Karm (2026-09-21)
+
+### Fixed
+
+- "Always trust plugins" setting is now applied consistently in fresh browsers.
+
+## [0.8.11] - Karm (2026-09-19)
+
+### Added
+
+- Ignored paths: setting to exclude paths from the file watcher using gitignore patterns.
+- `Refresh vault from disk` command.
+- Per-vault setting to always trust plugins.
+- More comprehensive configuration for Headless Sync.
+- Dev flags to suppress write failure notices and force reading view.
+- `process` shim.
+
+### Changed
+
+- Vault load speed improved by incremental file events.
+- Vaults on unmonitorable file systems are periodically scanned.
+- File watcher recovers after a vault folder is remounted.
+
+### Fixed
+
+- Headless Sync sign in made more reliable.
+- Headless Sync now syncs all file types by default.
+- Headless Sync handles a frozen process better.
+
 ## [0.8.10] - Karm (2026-08-20)
 
 ### Changed

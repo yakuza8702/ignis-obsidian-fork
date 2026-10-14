@@ -134,6 +134,44 @@ describe("getPending", () => {
   });
 });
 
+describe("estimateSize", () => {
+  it("sizes a binary-encoded string as its utf-8 byte length, the value that flushes to disk", () => {
+    const s = "ab" + String.fromCodePoint(0x00e9);
+
+    expect(coalescer.estimateSize(s, "binary")).toBe(
+      Buffer.byteLength(s, "utf-8"),
+    );
+    expect(coalescer.estimateSize(s, "binary")).not.toBe(
+      Buffer.byteLength(s, "latin1"),
+    );
+  });
+
+  it("sizes a buffer by its byte length, ignoring the encoding", () => {
+    const buf = Buffer.from([1, 2, 3, 4, 5]);
+
+    expect(coalescer.estimateSize(buf, "binary")).toBe(5);
+  });
+});
+
+describe("pendingBuffer", () => {
+  it("decodes a binary-encoded string as utf-8, the bytes that flush to disk", () => {
+    const s = "ab" + String.fromCodePoint(0x00e9);
+
+    expect(coalescer.pendingBuffer(s, "binary")).toEqual(
+      Buffer.from(s, "utf-8"),
+    );
+    expect(coalescer.pendingBuffer(s, "binary")).not.toEqual(
+      Buffer.from(s, "latin1"),
+    );
+  });
+
+  it("returns a buffer as is", () => {
+    const buf = Buffer.from([1, 2, 3]);
+
+    expect(coalescer.pendingBuffer(buf, "binary")).toBe(buf);
+  });
+});
+
 describe("flushAll", () => {
   it("drains all buffered writes to disk and clears pending state", async () => {
     const fileA = path.join(tmpDir, "a.txt");
@@ -156,29 +194,6 @@ describe("flushAll", () => {
   });
 });
 
-describe("cancelPending", () => {
-  it("drops a buffered write so a deleted file does not resurrect", async () => {
-    const filePath = path.join(tmpDir, "file.txt");
-
-    await coalescer.writeCoalesced(filePath, "first", "utf-8");
-    await coalescer.writeCoalesced(filePath, "second", "utf-8");
-    await fs.promises.unlink(filePath);
-
-    expect(coalescer.cancelPending(filePath)).toBe(true);
-
-    await sleep(SHORT_WINDOW_MS + 30);
-
-    await expect(fs.promises.access(filePath)).rejects.toMatchObject({
-      code: "ENOENT",
-    });
-    expect(coalescer.getPending(filePath)).toBeNull();
-  });
-
-  it("returns false when nothing is pending for the path", () => {
-    expect(coalescer.cancelPending(path.join(tmpDir, "absent.txt"))).toBe(false);
-  });
-});
-
 describe("flushPending", () => {
   it("writes the latest buffered data to disk ahead of the debounce timer", async () => {
     const filePath = path.join(tmpDir, "file.txt");
@@ -198,43 +213,18 @@ describe("flushPending", () => {
   });
 });
 
-describe("cancelPendingSubtree", () => {
-  it("drops buffered writes at or under a directory and leaves siblings and outsiders", async () => {
+describe("flushPendingSubtree", () => {
+  it("flushes buffered writes at or under a directory to disk and clears them", async () => {
     const dir = path.join(tmpDir, "sub");
     const sibling = path.join(tmpDir, "subling");
     await fs.promises.mkdir(dir);
     await fs.promises.mkdir(sibling);
 
-    const inside = [path.join(dir, "a.txt"), path.join(dir, "b.txt")];
-    const outside = [path.join(tmpDir, "c.txt"), path.join(sibling, "d.txt")];
-
-    for (const f of [...inside, ...outside]) {
-      await coalescer.writeCoalesced(f, "first", "utf-8");
-      await coalescer.writeCoalesced(f, "buffered", "utf-8");
-    }
-
-    expect(coalescer.cancelPendingSubtree(dir)).toBe(2);
-
-    for (const f of inside) {
-      expect(coalescer.getPending(f)).toBeNull();
-    }
-
-    for (const f of outside) {
-      expect(coalescer.getPending(f)).not.toBeNull();
-    }
-  });
-});
-
-describe("flushPendingSubtree", () => {
-  it("flushes buffered writes at or under a directory to disk and clears them", async () => {
-    const dir = path.join(tmpDir, "sub");
-    await fs.promises.mkdir(dir);
-
     const a = path.join(dir, "a.txt");
     const b = path.join(dir, "b.txt");
-    const outside = path.join(tmpDir, "c.txt");
+    const outside = [path.join(tmpDir, "c.txt"), path.join(sibling, "d.txt")];
 
-    for (const f of [a, b, outside]) {
+    for (const f of [a, b, ...outside]) {
       await coalescer.writeCoalesced(f, "first", "utf-8");
       await coalescer.writeCoalesced(f, "buffered", "utf-8");
     }
@@ -245,7 +235,10 @@ describe("flushPendingSubtree", () => {
     expect(await fs.promises.readFile(b, "utf-8")).toBe("buffered");
     expect(coalescer.getPending(a)).toBeNull();
     expect(coalescer.getPending(b)).toBeNull();
-    expect(coalescer.getPending(outside)).not.toBeNull();
+
+    for (const f of outside) {
+      expect(coalescer.getPending(f)).not.toBeNull();
+    }
   });
 });
 
@@ -289,6 +282,124 @@ describe("flush-failure durability", () => {
 
     expect(await fs.promises.readFile(filePath, "utf-8")).toBe("second");
     expect(coalescer.getPending(filePath)).toBeNull();
+  });
+});
+
+describe("flush success", () => {
+  let flushed;
+
+  beforeEach(() => {
+    flushed = [];
+    coalescer.onFlushSuccess((absPath) => flushed.push(absPath));
+  });
+
+  async function buffer(filePath, data) {
+    await coalescer.writeCoalesced(filePath, "first", "utf-8");
+    await coalescer.writeCoalesced(filePath, data, "utf-8");
+  }
+
+  it("reports the path when the debounce timer flushes", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+
+    await buffer(filePath, "second");
+
+    expect(flushed).toEqual([]);
+
+    await sleep(SHORT_WINDOW_MS + 30);
+
+    expect(flushed).toEqual([filePath]);
+  });
+
+  it("reports the path flushPending wrote", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+
+    await buffer(filePath, "second");
+    await coalescer.flushPending(filePath);
+
+    expect(flushed).toEqual([filePath]);
+  });
+
+  it("says nothing for a flushPending with nothing buffered", async () => {
+    await coalescer.flushPending(path.join(tmpDir, "absent.txt"));
+
+    expect(flushed).toEqual([]);
+  });
+
+  it("reports each path in a subtree flush once", async () => {
+    const dir = path.join(tmpDir, "sub");
+    await fs.promises.mkdir(dir);
+
+    const a = path.join(dir, "a.txt");
+    const b = path.join(dir, "b.txt");
+
+    await buffer(a, "second-a");
+    await buffer(b, "second-b");
+    await coalescer.flushPendingSubtree(dir);
+
+    expect(flushed.slice().sort()).toEqual([a, b].sort());
+  });
+
+  it("reports every path flushAll drains", async () => {
+    const a = path.join(tmpDir, "a.txt");
+    const b = path.join(tmpDir, "b.txt");
+
+    await buffer(a, "second-a");
+    await buffer(b, "second-b");
+    await coalescer.flushAll();
+
+    expect(flushed.slice().sort()).toEqual([a, b].sort());
+  });
+
+  it("says nothing for a write that goes straight to disk", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+
+    await coalescer.writeCoalesced(filePath, "only", "utf-8");
+    await sleep(SHORT_WINDOW_MS + 30);
+
+    expect(flushed).toEqual([]);
+  });
+
+  it("says nothing for a failed flush and reports the retry that lands", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+
+    await buffer(filePath, "second");
+
+    vi.spyOn(fs.promises, "writeFile").mockRejectedValueOnce(
+      Object.assign(new Error("EIO"), { code: "EIO" }),
+    );
+
+    await expect(coalescer.flushPending(filePath)).rejects.toThrow();
+
+    expect(flushed).toEqual([]);
+
+    await sleep(RETRY_BACKOFF_MS + 50);
+
+    expect(flushed).toEqual([filePath]);
+  });
+
+  it("stops reporting once unsubscribed", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+    const unsubscribed = [];
+    const off = coalescer.onFlushSuccess((absPath) =>
+      unsubscribed.push(absPath),
+    );
+
+    off();
+    await buffer(filePath, "second");
+    await coalescer.flushPending(filePath);
+
+    expect(unsubscribed).toEqual([]);
+    expect(flushed).toEqual([filePath]);
+  });
+
+  it("drops subscribers on reset", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+
+    coalescer._reset();
+    await buffer(filePath, "second");
+    await coalescer.flushPending(filePath);
+
+    expect(flushed).toEqual([]);
   });
 });
 
@@ -356,5 +467,206 @@ describe("flush give-up", () => {
     await coalescer.writeCoalesced(filePath, "third", "utf-8");
 
     expect(await fs.promises.readFile(filePath, "utf-8")).toBe("third");
+  });
+});
+
+describe("a flush already writing", () => {
+  const FLUSH_WRITE_MS = 100;
+
+  function slowDisk(failures) {
+    const realWrite = fs.promises.writeFile.bind(fs.promises);
+    const peakConcurrent = { value: 0 };
+    let active = 0;
+    let failed = 0;
+
+    vi.spyOn(fs.promises, "writeFile").mockImplementation(async (...args) => {
+      active++;
+      peakConcurrent.value = Math.max(peakConcurrent.value, active);
+
+      try {
+        await sleep(FLUSH_WRITE_MS);
+
+        if (failed < failures) {
+          failed++;
+          throw Object.assign(new Error("EIO"), { code: "EIO" });
+        }
+
+        return await realWrite(...args);
+      } finally {
+        active--;
+      }
+    });
+
+    return peakConcurrent;
+  }
+
+  async function startSlowFlush(filePath, failures = 0) {
+    await coalescer.writeCoalesced(filePath, "first", "utf-8");
+
+    const peakConcurrent = slowDisk(failures);
+
+    await coalescer.writeCoalesced(filePath, "second", "utf-8");
+    await sleep(SHORT_WINDOW_MS + 20);
+
+    return peakConcurrent;
+  }
+
+  it("holds a later save until it has landed", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+    const peakConcurrent = await startSlowFlush(filePath);
+
+    await coalescer.writeCoalesced(filePath, "third", "utf-8");
+
+    expect(peakConcurrent.value).toBe(1);
+    expect(await fs.promises.readFile(filePath, "utf-8")).toBe("third");
+  });
+
+  it("serves its data to a read", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+
+    await startSlowFlush(filePath);
+
+    expect(coalescer.getPending(filePath)).toEqual({
+      data: "second",
+      encoding: "utf-8",
+    });
+
+    await coalescer.flushPending(filePath);
+
+    expect(await fs.promises.readFile(filePath, "utf-8")).toBe("second");
+  });
+
+  it("is waited out by flushPending", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+
+    await startSlowFlush(filePath);
+    await coalescer.flushPending(filePath);
+
+    expect(await fs.promises.readFile(filePath, "utf-8")).toBe("second");
+  });
+
+  it("is waited out by supersedePending, so a delete it runs sticks", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+
+    await startSlowFlush(filePath);
+    await coalescer.supersedePending(filePath, () =>
+      fs.promises.unlink(filePath),
+    );
+    await sleep(FLUSH_WRITE_MS + 50);
+
+    await expect(fs.promises.access(filePath)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("is paused by supersedePending when it fails, so a delete it runs still sticks", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+
+    await startSlowFlush(filePath, 1);
+    await coalescer.supersedePending(filePath, () =>
+      fs.promises.unlink(filePath),
+    );
+    await sleep(RETRY_BACKOFF_MS + FLUSH_WRITE_MS + 50);
+
+    expect(coalescer.getPending(filePath)).toBeNull();
+    await expect(fs.promises.access(filePath)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("is waited out by supersedePendingSubtree", async () => {
+    const dir = path.join(tmpDir, "sub");
+    const filePath = path.join(dir, "file.txt");
+    let seen;
+
+    await fs.promises.mkdir(dir);
+    await startSlowFlush(filePath);
+    await coalescer.supersedePendingSubtree(dir, async () => {
+      seen = await fs.promises.readFile(filePath, "utf-8");
+    });
+
+    expect(seen).toBe("second");
+  });
+
+  it("is waited out by flushAll", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+
+    await startSlowFlush(filePath);
+    await coalescer.flushAll();
+
+    expect(await fs.promises.readFile(filePath, "utf-8")).toBe("second");
+  });
+});
+
+describe("supersedePending", () => {
+  async function buffered(filePath) {
+    await coalescer.writeCoalesced(filePath, "first", "utf-8");
+    await coalescer.writeCoalesced(filePath, "buffered", "utf-8");
+  }
+
+  it("drops the buffered write once the op succeeds", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+
+    await buffered(filePath);
+    await coalescer.supersedePending(filePath, () =>
+      fs.promises.unlink(filePath),
+    );
+    await sleep(SHORT_WINDOW_MS + 30);
+
+    expect(coalescer.getPending(filePath)).toBeNull();
+    await expect(fs.promises.access(filePath)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("keeps the buffered write when the op fails, and flushes it", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+
+    await buffered(filePath);
+    await expect(
+      coalescer.supersedePending(filePath, async () => {
+        throw new Error("op failed");
+      }),
+    ).rejects.toThrow("op failed");
+    await sleep(SHORT_WINDOW_MS + 30);
+
+    expect(await fs.promises.readFile(filePath, "utf-8")).toBe("buffered");
+  });
+
+  it("pauses the buffered write while the op runs", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+    let seen;
+
+    await buffered(filePath);
+    await coalescer.supersedePending(filePath, async () => {
+      await sleep(SHORT_WINDOW_MS + 30);
+      seen = await fs.promises.readFile(filePath, "utf-8");
+    });
+
+    expect(seen).toBe("first");
+  });
+
+  it("keeps a write buffered while the op runs", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+
+    await buffered(filePath);
+    await coalescer.supersedePending(filePath, async () => {
+      await coalescer.writeCoalesced(filePath, "newer", "utf-8");
+    });
+    await sleep(SHORT_WINDOW_MS + 30);
+
+    expect(await fs.promises.readFile(filePath, "utf-8")).toBe("newer");
+  });
+
+  it("keeps a write of the same content buffered while the op runs", async () => {
+    const filePath = path.join(tmpDir, "file.txt");
+
+    await buffered(filePath);
+    await coalescer.supersedePending(filePath, async () => {
+      await coalescer.writeCoalesced(filePath, "buffered", "utf-8");
+    });
+    await sleep(SHORT_WINDOW_MS + 30);
+
+    expect(await fs.promises.readFile(filePath, "utf-8")).toBe("buffered");
   });
 });

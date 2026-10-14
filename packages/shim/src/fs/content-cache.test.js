@@ -70,6 +70,33 @@ describe("ContentCache LRU eviction", () => {
     vi.restoreAllMocks();
   });
 
+  it("keeps currentBytes accurate when replacing the LRU entry evicts", () => {
+    let now = 1000;
+    vi.spyOn(Date, "now").mockImplementation(() => now++);
+
+    const cache = new ContentCache(12);
+    cache.set("a.md", "aaaa"); // 4
+    cache.set("b.md", "bbbb"); // 4
+    cache.set("c.md", "cccc"); // 4
+    cache.get("b.md");
+    cache.get("c.md");
+
+    cache.set("a.md", "aaaaa"); // 5, a.md is the LRU
+
+    expect(cache.has("a.md")).toBe(true);
+    expect(cache.has("b.md")).toBe(false);
+    expect(cache.size).toBe(2);
+    expect(cache.currentBytes).toBe(9); // c (4) + a (5)
+
+    for (let i = 0; i < 5; i++) {
+      cache.set("a.md", "aaaaa");
+    }
+
+    expect(cache.currentBytes).toBe(9);
+
+    vi.restoreAllMocks();
+  });
+
   it("entry larger than maxSize still gets stored", () => {
     const cache = new ContentCache(5);
     cache.set("small.md", "ab"); // 2
@@ -103,5 +130,104 @@ describe("ContentCache maxSize", () => {
     const cache = new ContentCache(1024);
     cache.setMaxSize(64 * 1024);
     expect(cache.maxSize).toBe(64 * 1024);
+  });
+});
+
+// -- Server content ------------------------------------------------------
+
+describe("ContentCache server content", () => {
+  it("stores a fetched result when the path is unchanged since the fetch began", () => {
+    const cache = new ContentCache(1024);
+    const updatesBefore = cache.pathUpdates("a.md");
+
+    expect(cache.setFromServer("a.md", "server", updatesBefore)).toBe(true);
+    expect(cache.get("a.md")).toBe("server");
+  });
+
+  it("drops a fetched result when the path was written during the fetch", () => {
+    const cache = new ContentCache(1024);
+    const updatesBefore = cache.pathUpdates("a.md");
+
+    cache.set("a.md", "local");
+
+    expect(cache.setFromServer("a.md", "server", updatesBefore)).toBe(false);
+    expect(cache.get("a.md")).toBe("local");
+  });
+
+  it("drops a fetched result when the path was invalidated during the fetch", () => {
+    const cache = new ContentCache(1024);
+
+    cache.set("a.md", "old");
+
+    const updatesBefore = cache.pathUpdates("a.md");
+
+    cache.invalidate("a.md");
+
+    expect(cache.setFromServer("a.md", "server", updatesBefore)).toBe(false);
+    expect(cache.has("a.md")).toBe(false);
+  });
+
+  it("never replaces cached content with a fetched result", () => {
+    const cache = new ContentCache(1024);
+
+    cache.set("a.md", "local");
+
+    expect(
+      cache.setFromServer("a.md", "server", cache.pathUpdates("a.md")),
+    ).toBe(false);
+    expect(cache.get("a.md")).toBe("local");
+  });
+
+  it("matches path updates across path spellings", () => {
+    const cache = new ContentCache(1024);
+    const updatesBefore = cache.pathUpdates("dir/a.md");
+
+    cache.set("dir\\a.md", "local");
+
+    expect(cache.setFromServer("/dir/a.md", "server", updatesBefore)).toBe(
+      false,
+    );
+  });
+});
+
+// -- Retained entries ----------------------------------------------------
+
+describe("ContentCache retained entries", () => {
+  it("evicts the oldest entry that is not retained", () => {
+    const cache = new ContentCache(10);
+
+    cache.retainWhile((path) => path === "a.md");
+    cache.set("a.md", "aaaa");
+    cache.set("b.md", "bbbb");
+    cache.set("c.md", "cccc");
+
+    expect(cache.has("a.md")).toBe(true);
+    expect(cache.has("b.md")).toBe(false);
+    expect(cache.has("c.md")).toBe(true);
+  });
+
+  it("stores past the limit when every entry is retained", () => {
+    const cache = new ContentCache(10);
+
+    cache.retainWhile(() => true);
+    cache.set("a.md", "aaaaaa");
+    cache.set("b.md", "bbbbbb");
+
+    expect(cache.has("a.md")).toBe(true);
+    expect(cache.has("b.md")).toBe(true);
+    expect(cache.currentBytes).toBe(12);
+  });
+
+  it("evicts a formerly retained entry once it is released", () => {
+    const retained = new Set(["a.md"]);
+    const cache = new ContentCache(10);
+
+    cache.retainWhile((path) => retained.has(path));
+    cache.set("a.md", "aaaaaa");
+    retained.delete("a.md");
+    cache.set("b.md", "bbbbbb");
+
+    expect(cache.has("a.md")).toBe(false);
+    expect(cache.has("b.md")).toBe(true);
   });
 });
