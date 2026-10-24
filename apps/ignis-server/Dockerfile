@@ -1,7 +1,7 @@
 # Build stage.
 # Runs from the repo root as build context so workspace symlinks resolve.
 # Copies workspace package.jsons first for cache-friendly npm ci.
-FROM node:22-slim AS build
+FROM node:22.23.4-slim AS build
 
 WORKDIR /app
 
@@ -24,7 +24,7 @@ RUN IGNIS_BUILD=${IGNIS_BUILD} npm run build
 
 # Production image. No Obsidian code included.
 # On first run, the entrypoint downloads Obsidian.
-FROM node:22-slim
+FROM node:22.23.4-slim
 
 LABEL com.thiefling.ignis.obsidian-version="1.14.4"
 
